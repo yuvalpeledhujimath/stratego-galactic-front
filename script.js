@@ -807,14 +807,6 @@
     if (state.online.suppressSync) {
       return;
     }
-    if (!force) {
-      if (state.phase === "deploy" && state.deploymentSide !== state.humanSide) {
-        return;
-      }
-      if (state.phase === "battle" && !state.gameOver && state.currentTurn !== state.humanSide) {
-        return;
-      }
-    }
 
     const snapshot = buildOnlineSnapshot();
     const serial = JSON.stringify(snapshot);
