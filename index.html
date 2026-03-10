@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stratego: Galactic Front</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="stars"></div>
+  <main class="app-shell">
+    <header class="top-bar">
+      <h1>Stratego: Galactic Front</h1>
+      <p>Command the Light or Dark side in tactical ground warfare.</p>
+    </header>
+
+    <section id="setupPanel" class="setup-panel">
+      <h2>Mission Setup</h2>
+
+      <div class="option-group">
+        <p class="label">Game Mode</p>
+        <div class="option-row" id="modeOptions">
+          <button class="choice-btn active" data-mode="pvc">Player vs Computer</button>
+          <button class="choice-btn" data-mode="online">Online (PIN)</button>
+        </div>
+      </div>
+
+      <div class="option-group hidden" id="difficultyGroup">
+        <p class="label">Computer Difficulty</p>
+        <div class="option-row" id="difficultyOptions">
+          <button class="choice-btn active" data-difficulty="easy">Easy</button>
+          <button class="choice-btn" data-difficulty="medium">Medium</button>
+          <button class="choice-btn" data-difficulty="hard">Hard</button>
+          <button class="choice-btn" data-difficulty="expert">Expert</button>
+        </div>
+      </div>
+
+      <div class="option-group hidden" id="sideGroup">
+        <p class="label">Your Side (PvC)</p>
+        <div class="option-row" id="sideOptions">
+          <button class="choice-btn active" data-side="light">Light Side</button>
+          <button class="choice-btn" data-side="dark">Dark Side</button>
+        </div>
+      </div>
+
+      <div class="option-group hidden" id="onlineGroup">
+        <p class="label">Online Match (2 Devices)</p>
+        <div class="option-row">
+          <button id="createOnlineBtn" class="action">Create Game PIN</button>
+        </div>
+        <div class="option-row online-join-row">
+          <input id="joinPinInput" class="online-input" type="text" maxlength="6" placeholder="Enter PIN" />
+          <button id="joinOnlineBtn" class="action">Join by PIN</button>
+        </div>
+        <p id="onlineStatus" class="online-status">Create a room or join with a PIN.</p>
+        <p id="onlinePin" class="online-pin hidden">Game PIN: <strong id="onlinePinValue">-</strong></p>
+      </div>
+
+      <div class="actions">
+        <button id="startBtn" class="action primary">Start Battle</button>
+      </div>
+    </section>
+
+    <section id="gamePanel" class="game-panel hidden">
+      <div class="hud">
+        <div class="hud-card">
+          <p class="hud-label">Mode</p>
+          <p id="hudMode" class="hud-value">-</p>
+        </div>
+        <div class="hud-card">
+          <p class="hud-label">Turn</p>
+          <p id="hudTurn" class="hud-value">-</p>
+        </div>
+        <div class="hud-card">
+          <p class="hud-label">Status</p>
+          <p id="hudStatus" class="hud-value">Deploying...</p>
+        </div>
+      </div>
+
+      <div class="battle-area">
+        <div class="board-wrap">
+          <div id="board" class="board" aria-label="Stratego board"></div>
+          <div id="battleModal" class="battle-modal hidden" aria-live="polite">
+            <div class="battle-card">
+              <h3 id="battleTitle">Battle at A1:</h3>
+              <p id="battleLightLine" class="battle-line light">Light fighter: [0] --</p>
+              <p id="battleDarkLine" class="battle-line dark">Dark fighter: [0] --</p>
+              <p id="battleResultLine" class="battle-line result">Both sides lost!</p>
+              <p class="battle-continue">Press any key to continue</p>
+            </div>
+          </div>
+          <div id="turnOverlay" class="turn-overlay hidden">
+            <div class="overlay-card">
+              <h3 id="overlayTitle">Pass Device</h3>
+              <p id="overlayText">Prepare for the next commander.</p>
+              <button id="revealBtn" class="action primary">Reveal Battlefield</button>
+            </div>
+          </div>
+        </div>
+
+        <aside class="side-panel">
+          <div class="panel-card">
+            <h3>Battle Log</h3>
+            <ul id="battleLog" class="log-list"></ul>
+          </div>
+          <div id="deployPanel" class="panel-card deploy-panel hidden">
+            <h3>Deployment Bay</h3>
+            <p id="deployInfo" class="deploy-info"></p>
+            <div id="piecePalette" class="piece-palette"></div>
+            <div class="actions vertical">
+              <button id="clearDeployBtn" class="action">Clear This Side</button>
+              <button id="autoDeployBtn" class="action">Auto Place Remaining</button>
+              <button id="confirmDeployBtn" class="action primary">Confirm Deployment</button>
+            </div>
+          </div>
+          <div id="duelPanel" class="panel-card duel-panel hidden">
+            <h3>Last Duel</h3>
+            <p id="duelNumbers" class="duel-line">No battles yet.</p>
+            <p id="duelWinner" class="duel-line muted">-</p>
+          </div>
+          <div id="inventoryPanel" class="panel-card inventory-panel hidden">
+            <h3>Unit Inventory</h3>
+            <div class="inventory-grid">
+              <section class="inventory-side light">
+                <div class="inventory-head">
+                  <strong>Light Side</strong>
+                </div>
+                <ul id="inventoryLight" class="inventory-list"></ul>
+              </section>
+              <section class="inventory-side dark">
+                <div class="inventory-head">
+                  <strong>Dark Side</strong>
+                </div>
+                <ul id="inventoryDark" class="inventory-list"></ul>
+              </section>
+            </div>
+          </div>
+          <div class="panel-card">
+            <h3>Commands</h3>
+            <div class="actions vertical">
+              <button id="resetBtn" class="action">New Mission</button>
+              <button id="randomizeBtn" class="action">Re-deploy & Restart</button>
+            </div>
+          </div>
+          <div class="panel-card legend">
+            <h3>Unit Ranks</h3>
+            <ul>
+              <li><strong>10</strong> Supreme Commander</li>
+              <li><strong>1</strong> Spy can defeat <strong>10</strong> only when attacking</li>
+              <li><strong>3</strong> Saboteur defeats Bomb</li>
+              <li><strong>2</strong> Recon can move multiple tiles</li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
