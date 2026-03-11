@@ -250,6 +250,7 @@
   if (!engine) {
     throw new Error("StrategoEngine failed to load.");
   }
+  const aiModel = window.StrategoAiModel || null;
 
   const state = {
     mode: "pvc",
@@ -1155,9 +1156,18 @@
 
     const reserve = state.deployReserve[side];
     const profile = DEPLOYMENT_PROFILE[profileName] || DEPLOYMENT_PROFILE.medium;
-    const trials = DEPLOYMENT_SEARCH_TRIALS[profileName] ?? DEPLOYMENT_SEARCH_TRIALS.medium;
-    const diversifyTop = DEPLOYMENT_DIVERSITY[profileName] || 1;
-    const optimized = optimizeDeploymentForSide(state.board, side, reserve, profile, trials, diversifyTop);
+    const searchOptions = getUiDeploymentSearchOptions(profileName);
+    const trials = searchOptions.trials ?? DEPLOYMENT_SEARCH_TRIALS[profileName] ?? DEPLOYMENT_SEARCH_TRIALS.medium;
+    const diversifyTop = searchOptions.diversifyTop ?? (DEPLOYMENT_DIVERSITY[profileName] || 1);
+    const optimized = optimizeDeploymentForSide(
+      state.board,
+      side,
+      reserve,
+      profile,
+      trials,
+      diversifyTop,
+      searchOptions.engineOptions || {}
+    );
 
     if (optimized) {
       for (let r = 0; r < BOARD_SIZE; r += 1) {
@@ -1185,11 +1195,60 @@
     }
   }
 
-  function optimizeDeploymentForSide(board, side, reserve, profile, trials, diversifyTop = 1) {
+  function getUiDeploymentSearchOptions(profileName) {
+    if (profileName === "player") {
+      return {
+        trials: 10,
+        diversifyTop: 5,
+        engineOptions: {
+          enableRollouts: false,
+        },
+      };
+    }
+
+    if (profileName === "expert") {
+      return {
+        trials: 20,
+        engineOptions: {
+          rolloutProfile: {
+            topCandidates: 2,
+            opponentSetups: 1,
+            plies: 4,
+            weight: 0.18,
+            ownDifficulty: "hard",
+            enemyDifficulty: "hard",
+            opponentProfileName: "player",
+          },
+        },
+      };
+    }
+
+    if (profileName === "hard") {
+      return {
+        trials: 14,
+        engineOptions: {
+          enableRollouts: false,
+        },
+      };
+    }
+
+    return {};
+  }
+
+  function optimizeDeploymentForSide(
+    board,
+    side,
+    reserve,
+    profile,
+    trials,
+    diversifyTop = 1,
+    engineOptions = {}
+  ) {
     const profileName =
       Object.keys(DEPLOYMENT_PROFILE).find((key) => DEPLOYMENT_PROFILE[key] === profile) || "medium";
 
     return engine.optimizeDeploymentForSide(board, side, reserve, {
+      ...engineOptions,
       profile,
       profileName,
       trials,
@@ -2143,6 +2202,7 @@
       difficulty: state.difficulty,
       useFog: isAiFogEnabled(),
       knowledge: state.aiKnowledge,
+      model: aiModel,
       rng: Math.random,
     });
   }
