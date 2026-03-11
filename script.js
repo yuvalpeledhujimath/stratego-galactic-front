@@ -134,7 +134,7 @@
   };
 
   const DEPLOYMENT_DIVERSITY = {
-    player: 4,
+    player: 5,
   };
 
   const PIECE_VALUE = {
@@ -246,6 +246,11 @@
     },
   };
 
+  const engine = window.StrategoEngine;
+  if (!engine) {
+    throw new Error("StrategoEngine failed to load.");
+  }
+
   const state = {
     mode: "pvc",
     difficulty: "easy",
@@ -279,10 +284,7 @@
       dark: makeZeroCountMap(),
     },
     lastStep: null,
-    aiKnowledge: {
-      knownEnemyIds: new Set(),
-      movedEnemyIds: new Set(),
-    },
+    aiKnowledge: engine.makeKnowledgeState(),
     online: {
       socket: null,
       connected: false,
@@ -504,10 +506,7 @@
       dark: makeZeroCountMap(),
     };
     state.lastStep = null;
-    state.aiKnowledge = {
-      knownEnemyIds: new Set(),
-      movedEnemyIds: new Set(),
-    };
+    state.aiKnowledge = engine.makeKnowledgeState();
     state.selected = null;
     state.legalTargets = [];
     state.viewerSide = state.mode === "online" && state.online.side ? state.online.side : "light";
@@ -545,10 +544,7 @@
       dark: makeZeroCountMap(),
     };
     state.lastStep = null;
-    state.aiKnowledge = {
-      knownEnemyIds: new Set(),
-      movedEnemyIds: new Set(),
-    };
+    state.aiKnowledge = engine.makeKnowledgeState();
     clearMoveLayer();
 
     state.deployReserve = {
@@ -779,10 +775,7 @@
       dark: makeZeroCountMap(),
     };
     state.lastStep = null;
-    state.aiKnowledge = {
-      knownEnemyIds: new Set(),
-      movedEnemyIds: new Set(),
-    };
+    state.aiKnowledge = engine.makeKnowledgeState();
     state.deployReserve = {
       light: makeFullReserve(),
       dark: makeFullReserve(),
@@ -1167,7 +1160,21 @@
     const optimized = optimizeDeploymentForSide(state.board, side, reserve, profile, trials, diversifyTop);
 
     if (optimized) {
-      state.board = optimized.board;
+      for (let r = 0; r < BOARD_SIZE; r += 1) {
+        for (let c = 0; c < BOARD_SIZE; c += 1) {
+          if (!isDeploymentCellForSide(r, c, side)) {
+            continue;
+          }
+
+          const candidate = optimized.board[r][c];
+          const current = state.board[r][c];
+          if (candidate && candidate !== "lake" && candidate.side === side) {
+            state.board[r][c] = candidate;
+          } else if (current && current !== "lake" && current.side === side) {
+            state.board[r][c] = null;
+          }
+        }
+      }
       state.deployReserve[side] = optimized.reserve;
     } else {
       placePiecesStrategically(state.board, side, reserve, profile);
@@ -1179,54 +1186,16 @@
   }
 
   function optimizeDeploymentForSide(board, side, reserve, profile, trials, diversifyTop = 1) {
-    const iterations = Math.max(1, trials);
-    const candidates = [];
+    const profileName =
+      Object.keys(DEPLOYMENT_PROFILE).find((key) => DEPLOYMENT_PROFILE[key] === profile) || "medium";
 
-    for (let i = 0; i < iterations; i += 1) {
-      const boardCopy = cloneBoard(board);
-      const reserveCopy = { ...reserve };
-      placePiecesStrategically(boardCopy, side, reserveCopy, profile);
-
-      const remaining = reserveMapTotal(reserveCopy);
-      const score = evaluateDeploymentBoard(boardCopy, side) - remaining * 80_000;
-      candidates.push({ board: boardCopy, reserve: reserveCopy, score });
-    }
-
-    if (candidates.length === 0) {
-      return null;
-    }
-
-    candidates.sort((a, b) => b.score - a.score);
-
-    const topCount = Math.max(1, Math.min(diversifyTop, candidates.length));
-    if (topCount === 1) {
-      const best = candidates[0];
-      return { board: best.board, reserve: best.reserve };
-    }
-
-    const top = candidates.slice(0, topCount);
-    const floor = top[top.length - 1].score;
-    const weights = top.map((entry, idx) => {
-      const rankBoost = topCount - idx;
-      const scoreBoost = Math.max(1, entry.score - floor + 1);
-      return rankBoost * scoreBoost;
+    return engine.optimizeDeploymentForSide(board, side, reserve, {
+      profile,
+      profileName,
+      trials,
+      diversifyTop,
+      createPiece,
     });
-
-    let total = 0;
-    weights.forEach((w) => {
-      total += w;
-    });
-
-    let roll = Math.random() * total;
-    for (let i = 0; i < top.length; i += 1) {
-      roll -= weights[i];
-      if (roll <= 0) {
-        return { board: top[i].board, reserve: top[i].reserve };
-      }
-    }
-
-    const fallback = top[0];
-    return { board: fallback.board, reserve: fallback.reserve };
   }
 
   function placePiecesStrategically(board, side, reserve, profile) {
@@ -1889,7 +1858,7 @@
     const attacker = copyPiece(liveAttacker);
     const defender = copyPiece(state.board[move.toR][move.toC]);
     if (isAiFogEnabled()) {
-      noteAiKnowledgeFromMovement(attacker);
+      noteAiKnowledgeFromMovement(attacker, move);
     }
 
     const outcome = applyMove(state.board, move);
@@ -2168,28 +2137,14 @@
   }
 
   function chooseAiMove() {
-    const moves = getAllLegalMoves(state.board, state.aiSide);
-    if (moves.length === 0) {
-      return null;
-    }
-
-    if (isAiFogEnabled()) {
-      return chooseAiMoveFogAware(moves);
-    }
-
-    if (state.difficulty === "easy") {
-      return sample(moves);
-    }
-
-    if (state.difficulty === "medium") {
-      return chooseHeuristicMove(state.board, moves, state.aiSide, DIFFICULTY_PROFILE.medium);
-    }
-
-    if (state.difficulty === "hard") {
-      return chooseHardMove(moves);
-    }
-
-    return chooseExpertMove(moves);
+    return engine.chooseAiMove(state.board, {
+      side: state.aiSide,
+      enemySide: state.humanSide,
+      difficulty: state.difficulty,
+      useFog: isAiFogEnabled(),
+      knowledge: state.aiKnowledge,
+      rng: Math.random,
+    });
   }
 
   function chooseAiMoveFogAware(moves) {
@@ -3562,31 +3517,26 @@
     return state.mode === "pvc" && !!state.aiSide && !!state.humanSide;
   }
 
-  function noteAiKnowledgeFromMovement(attacker) {
-    if (!attacker || attacker.side !== state.humanSide) {
+  function noteAiKnowledgeFromMovement(attacker, move) {
+    if (!attacker || !move || attacker.side !== state.humanSide || !state.aiSide) {
       return;
     }
-    state.aiKnowledge.movedEnemyIds.add(attacker.id);
+    engine.observeEnemyMovement(state.aiKnowledge, state.aiSide, attacker, move);
   }
 
   function noteAiKnowledgeFromBattle(attacker, defender) {
-    [attacker, defender].forEach((piece) => {
-      if (!piece || piece.side !== state.humanSide) {
-        return;
-      }
-      state.aiKnowledge.knownEnemyIds.add(piece.id);
-      if (piece.type === "bomb" || piece.type === "flag") {
-        state.aiKnowledge.movedEnemyIds.delete(piece.id);
-      }
-    });
+    if (!state.aiSide) {
+      return;
+    }
+    engine.observeBattle(state.aiKnowledge, state.aiSide, attacker, defender);
   }
 
   function isKnownEnemyToAi(piece) {
-    return !!piece && state.aiKnowledge.knownEnemyIds.has(piece.id);
+    return engine.isKnownEnemy(piece, state.aiKnowledge);
   }
 
   function hasEnemyMovedToAi(piece) {
-    return !!piece && state.aiKnowledge.movedEnemyIds.has(piece.id);
+    return engine.hasEnemyMoved(piece, state.aiKnowledge);
   }
 
   function copyPiece(piece) {
