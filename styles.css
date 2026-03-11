@@ -251,6 +251,13 @@ body {
   aspect-ratio: 1 / 1;
 }
 
+.move-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+
 .cell {
   position: relative;
   border: 1px solid rgba(132, 171, 225, 0.23);
@@ -366,6 +373,18 @@ body {
 .piece.concealed {
   font-size: 1rem;
   letter-spacing: 0.03em;
+}
+
+.piece.moving-origin {
+  opacity: 0.12;
+}
+
+.flying-piece {
+  position: absolute;
+  margin: 0;
+  z-index: 2;
+  pointer-events: none;
+  transition: transform 500ms cubic-bezier(0.25, 0.9, 0.2, 1);
 }
 
 .piece.type-marshal,

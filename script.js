@@ -1,5 +1,6 @@
 (() => {
   const BOARD_SIZE = 10;
+  const MOVE_ANIMATION_MS = 500;
   const DIRECTIONS = [
     [1, 0],
     [-1, 0],
@@ -267,6 +268,7 @@
     revealPending: false,
     revealContext: null,
     aiThinking: false,
+    animatingMove: false,
     battleLog: [],
     lastBattle: null,
     battleDialog: null,
@@ -328,6 +330,8 @@
     battleLightLine: document.getElementById("battleLightLine"),
     battleDarkLine: document.getElementById("battleDarkLine"),
     battleResultLine: document.getElementById("battleResultLine"),
+    boardWrap: document.querySelector(".board-wrap"),
+    moveLayer: document.getElementById("moveLayer"),
     inventoryPanel: document.getElementById("inventoryPanel"),
     inventoryLight: document.getElementById("inventoryLight"),
     inventoryDark: document.getElementById("inventoryDark"),
@@ -487,6 +491,7 @@
     state.gameOver = false;
     state.winner = null;
     state.aiThinking = false;
+    state.animatingMove = false;
     state.revealPending = false;
     state.revealContext = null;
     state.battleLog = [];
@@ -506,6 +511,7 @@
     state.selected = null;
     state.legalTargets = [];
     state.viewerSide = state.mode === "online" && state.online.side ? state.online.side : "light";
+    clearMoveLayer();
     hideOverlay();
 
     el.gamePanel.classList.add("hidden");
@@ -528,6 +534,7 @@
     state.gameOver = false;
     state.winner = null;
     state.aiThinking = false;
+    state.animatingMove = false;
     state.battleLog = [];
     state.lastBattle = null;
     state.battleDialog = null;
@@ -542,6 +549,7 @@
       knownEnemyIds: new Set(),
       movedEnemyIds: new Set(),
     };
+    clearMoveLayer();
 
     state.deployReserve = {
       light: makeFullReserve(),
@@ -760,6 +768,7 @@
     state.gameOver = false;
     state.winner = null;
     state.aiThinking = false;
+    state.animatingMove = false;
     state.battleLog = [];
     state.lastBattle = null;
     state.battleDialog = null;
@@ -789,6 +798,7 @@
     state.revealPending = false;
     state.revealContext = null;
     hideOverlay();
+    clearMoveLayer();
 
     addLog(`Online match ${state.online.pin} started. Light Side deploys first.`);
     el.setupPanel.classList.add("hidden");
@@ -875,6 +885,7 @@
     state.revealPending = false;
     state.revealContext = null;
     state.aiThinking = false;
+    state.animatingMove = false;
 
     const serial = JSON.stringify(snapshot);
     state.online.lastSentSnapshot = serial;
@@ -927,7 +938,7 @@
       return;
     }
 
-    if (state.gameOver || state.revealPending || state.aiThinking || state.resolvingBattle) {
+    if (state.gameOver || state.revealPending || state.aiThinking || state.resolvingBattle || state.animatingMove) {
       return;
     }
 
@@ -1841,11 +1852,46 @@
   }
 
   function performMove(move) {
-    const attacker = copyPiece(state.board[move.fromR][move.fromC]);
+    if (state.animatingMove) {
+      return;
+    }
+
+    const attacker = state.board[move.fromR][move.fromC];
+    if (!attacker || attacker === "lake") {
+      return;
+    }
+
+    state.animatingMove = true;
+    clearSelection();
+    renderBoard();
+    renderHud();
+
+    animateMoveTransition(move)
+      .catch(() => {})
+      .finally(() => {
+        state.animatingMove = false;
+        resolveMoveAfterAnimation(move);
+      });
+  }
+
+  function resolveMoveAfterAnimation(move) {
+    if (state.phase !== "battle") {
+      renderAll();
+      return;
+    }
+
+    const liveAttacker = state.board[move.fromR][move.fromC];
+    if (!liveAttacker || liveAttacker === "lake") {
+      renderAll();
+      return;
+    }
+
+    const attacker = copyPiece(liveAttacker);
     const defender = copyPiece(state.board[move.toR][move.toC]);
     if (isAiFogEnabled()) {
       noteAiKnowledgeFromMovement(attacker);
     }
+
     const outcome = applyMove(state.board, move);
     state.lastStep = {
       cells: [
@@ -2083,7 +2129,7 @@
   }
 
   function queueAiTurn() {
-    if (state.phase !== "battle" || state.resolvingBattle) {
+    if (state.phase !== "battle" || state.resolvingBattle || state.animatingMove) {
       return;
     }
 
@@ -2103,6 +2149,7 @@
         state.mode !== "pvc" ||
         state.phase !== "battle" ||
         state.currentTurn !== state.aiSide ||
+        state.animatingMove ||
         !state.aiThinking
       ) {
         return;
@@ -3042,6 +3089,11 @@
       return;
     }
 
+    if (state.animatingMove) {
+      el.hudStatus.textContent = "Unit moving...";
+      return;
+    }
+
     if (state.resolvingBattle) {
       el.hudStatus.textContent = "Resolving duel...";
       return;
@@ -3124,6 +3176,79 @@
         el.board.appendChild(cell);
       }
     }
+  }
+
+  function animateMoveTransition(move) {
+    if (!el.moveLayer || !el.boardWrap) {
+      return Promise.resolve();
+    }
+
+    const fromCell = el.board.querySelector(
+      `.cell[data-row="${move.fromR}"][data-col="${move.fromC}"]`
+    );
+    const toCell = el.board.querySelector(`.cell[data-row="${move.toR}"][data-col="${move.toC}"]`);
+    const fromPiece = fromCell?.querySelector(".piece");
+    if (!fromCell || !toCell || !fromPiece) {
+      return Promise.resolve();
+    }
+
+    const boardWrapRect = el.boardWrap.getBoundingClientRect();
+    const fromRect = fromPiece.getBoundingClientRect();
+    const toRect = toCell.getBoundingClientRect();
+
+    const clone = fromPiece.cloneNode(true);
+    clone.classList.remove("moving-origin");
+    clone.classList.add("flying-piece");
+    clone.style.width = `${fromRect.width}px`;
+    clone.style.height = `${fromRect.height}px`;
+    clone.style.left = `${fromRect.left - boardWrapRect.left}px`;
+    clone.style.top = `${fromRect.top - boardWrapRect.top}px`;
+
+    const targetX =
+      toRect.left - fromRect.left + (toRect.width - fromRect.width) / 2;
+    const targetY =
+      toRect.top - fromRect.top + (toRect.height - fromRect.height) / 2;
+
+    fromPiece.classList.add("moving-origin");
+    clearMoveLayer();
+    el.moveLayer.appendChild(clone);
+
+    return new Promise((resolve) => {
+      let finished = false;
+
+      const finish = () => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        fromPiece.classList.remove("moving-origin");
+        clearMoveLayer();
+        resolve();
+      };
+
+      const fallback = window.setTimeout(finish, MOVE_ANIMATION_MS + 80);
+      clone.addEventListener(
+        "transitionend",
+        () => {
+          window.clearTimeout(fallback);
+          finish();
+        },
+        { once: true }
+      );
+
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          clone.style.transform = `translate(${targetX}px, ${targetY}px)`;
+        });
+      });
+    });
+  }
+
+  function clearMoveLayer() {
+    if (!el.moveLayer) {
+      return;
+    }
+    el.moveLayer.innerHTML = "";
   }
 
   function renderBattleModal() {
@@ -3272,7 +3397,7 @@
   }
 
   function isCellSelectable(row, col) {
-    if (state.gameOver || state.revealPending || state.aiThinking || state.resolvingBattle) {
+    if (state.gameOver || state.revealPending || state.aiThinking || state.resolvingBattle || state.animatingMove) {
       return false;
     }
 
