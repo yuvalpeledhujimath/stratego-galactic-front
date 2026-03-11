@@ -1858,7 +1858,7 @@
     const attacker = copyPiece(liveAttacker);
     const defender = copyPiece(state.board[move.toR][move.toC]);
     if (isAiFogEnabled()) {
-      noteAiKnowledgeFromMovement(attacker, move);
+      noteAiKnowledgeFromMovement(attacker, move, defender);
     }
 
     const outcome = applyMove(state.board, move);
@@ -3517,11 +3517,13 @@
     return state.mode === "pvc" && !!state.aiSide && !!state.humanSide;
   }
 
-  function noteAiKnowledgeFromMovement(attacker, move) {
+  function noteAiKnowledgeFromMovement(attacker, move, defender) {
     if (!attacker || !move || attacker.side !== state.humanSide || !state.aiSide) {
       return;
     }
-    engine.observeEnemyMovement(state.aiKnowledge, state.aiSide, attacker, move);
+    engine.observeEnemyMovement(state.aiKnowledge, state.aiSide, attacker, move, {
+      isAttack: !!defender,
+    });
   }
 
   function noteAiKnowledgeFromBattle(attacker, defender) {

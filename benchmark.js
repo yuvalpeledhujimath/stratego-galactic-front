@@ -44,7 +44,9 @@ function parseArgs(argv) {
 
 function applyObservedKnowledge(knowledgeBySide, attacker, defender, move, outcome) {
   const observer = engine.oppositeSide(attacker.side);
-  engine.observeEnemyMovement(knowledgeBySide[observer], observer, attacker, move);
+  engine.observeEnemyMovement(knowledgeBySide[observer], observer, attacker, move, {
+    isAttack: !!defender,
+  });
 
   if (outcome.kind === "battle") {
     engine.observeBattle(knowledgeBySide.light, "light", attacker, defender);

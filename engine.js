@@ -362,6 +362,7 @@
     return {
       knownEnemyIds: new Set(seed.knownEnemyIds || []),
       movedEnemyIds: new Set(seed.movedEnemyIds || []),
+      enemyProfiles: { ...(seed.enemyProfiles || {}) },
     };
   }
 
@@ -378,16 +379,73 @@
         knowledge.movedEnemyIds instanceof Set
           ? knowledge.movedEnemyIds
           : new Set(knowledge.movedEnemyIds || []),
+      enemyProfiles: knowledge.enemyProfiles || {},
     };
   }
 
-  function observeEnemyMovement(knowledge, observerSide, piece, move) {
+  function createEnemyProfile() {
+    return {
+      moveCount: 0,
+      attackCount: 0,
+      maxDistance: 0,
+      totalDistance: 0,
+      forwardMoves: 0,
+      backwardMoves: 0,
+      lateralMoves: 0,
+      frontlineTurns: 0,
+      lastRow: null,
+      lastCol: null,
+    };
+  }
+
+  function enemyProfileFor(knowledge, pieceId) {
+    const known = normalizeKnowledge(knowledge);
+    if (!known.enemyProfiles[pieceId]) {
+      known.enemyProfiles[pieceId] = createEnemyProfile();
+    }
+    return known.enemyProfiles[pieceId];
+  }
+
+  function moveAdvanceDelta(side, move) {
+    return side === "light" ? move.fromR - move.toR : move.toR - move.fromR;
+  }
+
+  function isFrontlineRow(side, row) {
+    return side === "light" ? row <= 5 : row >= 4;
+  }
+
+  function observeEnemyMovement(knowledge, observerSide, piece, move, options = {}) {
     if (!piece || piece.side === observerSide) {
       return;
     }
 
     const known = normalizeKnowledge(knowledge);
+    const profile = enemyProfileFor(known, piece.id);
     const distance = Math.abs(move.toR - move.fromR) + Math.abs(move.toC - move.fromC);
+    const advanceDelta = moveAdvanceDelta(piece.side, move);
+
+    profile.moveCount += 1;
+    profile.maxDistance = Math.max(profile.maxDistance, distance);
+    profile.totalDistance += distance;
+    profile.lastRow = move.toR;
+    profile.lastCol = move.toC;
+
+    if (advanceDelta > 0) {
+      profile.forwardMoves += 1;
+    } else if (advanceDelta < 0) {
+      profile.backwardMoves += 1;
+    } else {
+      profile.lateralMoves += 1;
+    }
+
+    if (isFrontlineRow(piece.side, move.toR)) {
+      profile.frontlineTurns += 1;
+    }
+
+    if (options.isAttack) {
+      profile.attackCount += 1;
+    }
+
     if (distance > 1) {
       known.knownEnemyIds.add(piece.id);
       known.movedEnemyIds.delete(piece.id);
@@ -405,6 +463,9 @@
       if (!piece || piece.side === observerSide) {
         return;
       }
+      const profile = enemyProfileFor(known, piece.id);
+      profile.lastRow = null;
+      profile.lastCol = null;
       known.knownEnemyIds.add(piece.id);
       if (piece.type === "bomb" || piece.type === "flag") {
         known.movedEnemyIds.delete(piece.id);
@@ -1389,6 +1450,109 @@
     return ((PIECE_VALUE[defenderType] || 120) - (PIECE_VALUE[attacker.type] || 120)) * 0.22;
   }
 
+  function typeBeliefWeight(type, piece, knowledge, row, col) {
+    const profile = piece ? enemyProfileFor(knowledge, piece.id) : createEnemyProfile();
+    const progress = piece ? Math.max(0, deploymentDepth(piece.side, row)) : 0;
+    const edgeDist = col === null || col === undefined ? 4 : Math.min(col, BOARD_SIZE - 1 - col);
+    const advanceBias = Math.max(0, profile.forwardMoves - profile.backwardMoves);
+    let weight = 1;
+
+    if (profile.maxDistance > 1) {
+      if (type === "scout") {
+        return 80;
+      }
+      if (type === "bomb" || type === "flag") {
+        return 0.0001;
+      }
+      weight *= 0.18;
+    }
+
+    switch (type) {
+      case "flag":
+        if (profile.moveCount > 0 || profile.attackCount > 0) {
+          return 0.0001;
+        }
+        weight *= progress <= 1 ? 7.5 : progress === 2 ? 1.6 : 0.12;
+        weight *= edgeDist <= 1 ? 1.28 : 0.92;
+        break;
+      case "bomb":
+        if (profile.moveCount > 0) {
+          return 0.0001;
+        }
+        weight *= progress <= 1 ? 4.2 : progress === 2 ? 2.1 : 0.35;
+        weight *= edgeDist <= 1 ? 1.14 : 1;
+        break;
+      case "spy":
+        weight *= progress <= 2 ? 1.85 : 0.72;
+        weight *= profile.attackCount > 0 ? 0.7 : 1.18;
+        weight *= profile.backwardMoves > profile.forwardMoves ? 1.08 : 1;
+        break;
+      case "scout":
+        weight *= 1.05 + profile.totalDistance * 0.16 + profile.lateralMoves * 0.12;
+        weight *= 1 + profile.frontlineTurns * 0.05;
+        weight *= edgeDist <= 1 ? 1.08 : 1;
+        break;
+      case "miner":
+        weight *= 1.12 + profile.attackCount * 0.16 + advanceBias * 0.05;
+        weight *= progress <= 2 ? 1.22 : 0.96;
+        break;
+      case "marshal":
+      case "general":
+      case "colonel":
+      case "major":
+        weight *= 0.95 + profile.attackCount * 0.32 + advanceBias * 0.11;
+        weight *= 1 + profile.frontlineTurns * 0.08;
+        weight *= progress <= 2 && profile.moveCount <= 1 ? 0.88 : 1.06;
+        break;
+      case "captain":
+      case "lieutenant":
+      case "sergeant":
+        weight *= 1.02 + profile.attackCount * 0.18 + advanceBias * 0.08;
+        weight *= progress >= 3 ? 1.08 : 1;
+        break;
+      default:
+        weight *= 1;
+    }
+
+    return Math.max(0.0001, weight);
+  }
+
+  function weightedUnknownTypeDistribution(remainingByType, piece, knowledge, row, col, options = {}) {
+    const weights = makeZeroCountMap();
+    let total = 0;
+
+    Object.entries(remainingByType).forEach(([type, count]) => {
+      if (!count) {
+        return;
+      }
+      if (options.excludeImmobile && (type === "bomb" || type === "flag")) {
+        return;
+      }
+
+      const weight = count * typeBeliefWeight(type, piece, knowledge, row, col);
+      if (weight <= 0) {
+        return;
+      }
+
+      weights[type] = weight;
+      total += weight;
+    });
+
+    if (total > 0) {
+      return { weights, total };
+    }
+
+    Object.entries(remainingByType).forEach(([type, count]) => {
+      if (!count) {
+        return;
+      }
+      weights[type] = count;
+      total += count;
+    });
+
+    return { weights, total };
+  }
+
   function unknownEnemyTypeCounts(board, enemySide, knowledge) {
     const counts = makeZeroCountMap();
     for (let r = 0; r < BOARD_SIZE; r += 1) {
@@ -1406,44 +1570,36 @@
     return counts;
   }
 
-  function expectedBattleScoreAgainstUnknown(attacker, defender, board, context) {
+  function expectedBattleScoreAgainstUnknown(attacker, defender, board, context, row, col) {
     if (!attacker || !defender) {
       return 0;
     }
+
     const counts = unknownEnemyTypeCounts(board, context.enemySide, context.knowledge);
     const defenderMoved = hasEnemyMoved(defender, context.knowledge);
-    const filtered = makeZeroCountMap();
-    let total = 0;
+    const distribution = weightedUnknownTypeDistribution(
+      counts,
+      defender,
+      context.knowledge,
+      row,
+      col,
+      { excludeImmobile: defenderMoved }
+    );
 
-    Object.keys(counts).forEach((type) => {
-      if (defenderMoved && (type === "bomb" || type === "flag")) {
-        return;
-      }
-      filtered[type] = counts[type];
-      total += counts[type];
-    });
-
-    if (total <= 0) {
-      Object.keys(counts).forEach((type) => {
-        filtered[type] = counts[type];
-        total += counts[type];
-      });
-    }
-
-    if (total <= 0) {
+    if (distribution.total <= 0) {
       return 0;
     }
 
     let expected = 0;
-    Object.entries(filtered).forEach(([type, count]) => {
-      if (!count) {
+    Object.entries(distribution.weights).forEach(([type, weight]) => {
+      if (!weight) {
         return;
       }
       const result = virtualBattleResult(attacker, type);
-      expected += count * virtualBattleScore(attacker, type, result);
+      expected += weight * virtualBattleScore(attacker, type, result);
     });
 
-    return expected / total;
+    return expected / distribution.total;
   }
 
   function quickTacticalScore(board, move, side, context) {
@@ -1461,7 +1617,7 @@
     }
 
     if (shouldUseFogScoring(side, defender, context)) {
-      return expectedBattleScoreAgainstUnknown(attacker, defender, board, context);
+      return expectedBattleScoreAgainstUnknown(attacker, defender, board, context, move.toR, move.toC);
     }
 
     if (defender.type === "flag") {
@@ -1509,7 +1665,19 @@
       }
 
       if (context.useFog && enemy === context.enemySide && !isKnownEnemy(piece, context.knowledge)) {
-        risk += hasEnemyMoved(piece, context.knowledge) ? 22 : 13;
+        const counts = unknownEnemyTypeCounts(board, enemy, context.knowledge);
+        const distribution = weightedUnknownTypeDistribution(
+          counts,
+          piece,
+          context.knowledge,
+          r,
+          c,
+          { excludeImmobile: hasEnemyMoved(piece, context.knowledge) }
+        );
+        const expectedValue = Object.entries(distribution.weights).reduce((sum, [type, weight]) => {
+          return sum + weight * (PIECE_VALUE[type] || 120);
+        }, 0) / Math.max(1, distribution.total);
+        risk += expectedValue * 0.028;
         continue;
       }
 
@@ -1597,43 +1765,33 @@
     };
   }
 
-  function drawFogUnknownType(remainingByType, moved, rng = Math.random) {
-    const options = [];
-    let totalWeight = 0;
+  function drawFogUnknownType(remainingByType, piece, knowledge, row, col, moved, rng = Math.random) {
+    const distribution = weightedUnknownTypeDistribution(
+      remainingByType,
+      piece,
+      knowledge,
+      row,
+      col,
+      { excludeImmobile: moved }
+    );
 
-    Object.entries(remainingByType).forEach(([type, count]) => {
-      if (!count) {
-        return;
-      }
-      if (moved && (type === "bomb" || type === "flag")) {
-        return;
-      }
-      options.push({ type, weight: count });
-      totalWeight += count;
-    });
-
-    if (totalWeight <= 0) {
-      Object.entries(remainingByType).forEach(([type, count]) => {
-        if (!count) {
-          return;
-        }
-        options.push({ type, weight: count });
-        totalWeight += count;
-      });
-    }
-
-    if (totalWeight <= 0 || options.length === 0) {
+    if (distribution.total <= 0) {
       return null;
     }
 
-    let roll = rng() * totalWeight;
-    for (const option of options) {
-      roll -= option.weight;
+    let roll = rng() * distribution.total;
+    for (const [type, weight] of Object.entries(distribution.weights)) {
+      if (!weight) {
+        continue;
+      }
+      roll -= weight;
       if (roll <= 0) {
-        return option.type;
+        return type;
       }
     }
-    return options[options.length - 1].type;
+
+    const fallback = Object.entries(distribution.weights).find(([, weight]) => weight > 0);
+    return fallback ? fallback[0] : null;
   }
 
   function sampleFogHypothesisBoard(board, aiSide, knowledge, rng = Math.random) {
@@ -1664,12 +1822,20 @@
 
     const orderedUnknown = shuffled(unknownCells, rng).sort((a, b) => Number(b.moved) - Number(a.moved));
     for (const cell of orderedUnknown) {
-      const sampledType = drawFogUnknownType(remainingByType, cell.moved, rng);
-      if (!sampledType) {
-        continue;
-      }
       const piece = hypothesis[cell.r][cell.c];
       if (!piece || piece === "lake") {
+        continue;
+      }
+      const sampledType = drawFogUnknownType(
+        remainingByType,
+        piece,
+        knowledge,
+        cell.r,
+        cell.c,
+        cell.moved,
+        rng
+      );
+      if (!sampledType) {
         continue;
       }
       hypothesis[cell.r][cell.c] = withSampledType(piece, sampledType);
@@ -1695,7 +1861,43 @@
     return key;
   }
 
-  function orderMoveScore(board, move, turnSide, maximizingSide, context) {
+  function moveKey(move) {
+    return `${move.fromR}${move.fromC}${move.toR}${move.toC}`;
+  }
+
+  function createSearchState() {
+    return {
+      table: new Map(),
+      killerMoves: new Map(),
+      historyScores: new Map(),
+    };
+  }
+
+  function killerMoveBonus(searchState, depth, move) {
+    const killers = searchState.killerMoves.get(depth) || [];
+    const key = moveKey(move);
+    if (killers[0] === key) {
+      return 900;
+    }
+    if (killers[1] === key) {
+      return 450;
+    }
+    return 0;
+  }
+
+  function historyMoveBonus(searchState, move) {
+    return (searchState.historyScores.get(moveKey(move)) || 0) * 0.04;
+  }
+
+  function registerSearchCutoff(searchState, depth, move) {
+    const key = moveKey(move);
+    const killers = searchState.killerMoves.get(depth) || [];
+    const nextKillers = [key].concat(killers.filter((entry) => entry !== key)).slice(0, 2);
+    searchState.killerMoves.set(depth, nextKillers);
+    searchState.historyScores.set(key, (searchState.historyScores.get(key) || 0) + depth * depth);
+  }
+
+  function orderMoveScore(board, move, turnSide, maximizingSide, context, depth, searchState) {
     const nextBoard = cloneBoard(board);
     const outcome = applyMove(nextBoard, move);
     if (outcome.winner === maximizingSide) {
@@ -1712,10 +1914,15 @@
       turnSide === maximizingSide ? context : { ...context, useFog: false }
     );
     const evalShift = evaluateBoard(nextBoard, maximizingSide) - evaluateBoard(board, maximizingSide);
-    return tactical * 1.6 + evalShift * 0.32;
+    return (
+      tactical * 1.6 +
+      evalShift * 0.32 +
+      killerMoveBonus(searchState, depth, move) +
+      historyMoveBonus(searchState, move)
+    );
   }
 
-  function limitMovesForSearch(board, moves, turnSide, maximizingSide, searchProfile, context) {
+  function limitMovesForSearch(board, moves, turnSide, maximizingSide, searchProfile, context, depth, searchState) {
     const limit = turnSide === maximizingSide ? searchProfile.maxBranch : searchProfile.replyBranch;
     if (moves.length <= limit) {
       return moves;
@@ -1723,7 +1930,7 @@
 
     const scored = moves.map((move) => ({
       move,
-      score: orderMoveScore(board, move, turnSide, maximizingSide, context),
+      score: orderMoveScore(board, move, turnSide, maximizingSide, context, depth, searchState),
     }));
 
     scored.sort((a, b) => (turnSide === maximizingSide ? b.score - a.score : a.score - b.score));
@@ -1738,7 +1945,7 @@
     return searchProfile.depth;
   }
 
-  function searchBoard(board, depth, maximizingSide, turnSide, alpha, beta, searchProfile, context, table) {
+  function searchBoard(board, depth, maximizingSide, turnSide, alpha, beta, searchProfile, context, searchState) {
     const winner = winnerFromBoard(board);
     if (winner) {
       return winner === maximizingSide ? 8_000_000 + depth : -8_000_000 - depth;
@@ -1749,7 +1956,7 @@
     }
 
     const key = boardKey(board, turnSide);
-    const cached = table.get(key);
+    const cached = searchState.table.get(key);
     if (cached && cached.depth >= depth) {
       return cached.value;
     }
@@ -1759,7 +1966,7 @@
       return turnSide === maximizingSide ? -7_000_000 : 7_000_000;
     }
 
-    moves = limitMovesForSearch(board, moves, turnSide, maximizingSide, searchProfile, context);
+    moves = limitMovesForSearch(board, moves, turnSide, maximizingSide, searchProfile, context, depth, searchState);
 
     let value;
     let cutOff = false;
@@ -1777,11 +1984,12 @@
           beta,
           searchProfile,
           context,
-          table
+          searchState
         );
         value = Math.max(value, nextValue);
         alpha = Math.max(alpha, value);
         if (beta <= alpha) {
+          registerSearchCutoff(searchState, depth, move);
           cutOff = true;
           break;
         }
@@ -1800,11 +2008,12 @@
           beta,
           searchProfile,
           context,
-          table
+          searchState
         );
         value = Math.min(value, nextValue);
         beta = Math.min(beta, value);
         if (beta <= alpha) {
+          registerSearchCutoff(searchState, depth, move);
           cutOff = true;
           break;
         }
@@ -1812,7 +2021,7 @@
     }
 
     if (!cutOff) {
-      table.set(key, { depth, value });
+      searchState.table.set(key, { depth, value });
     }
     return value;
   }
@@ -1837,6 +2046,7 @@
 
     let bestScore = -Infinity;
     let bestMoves = [];
+    const searchState = createSearchState();
     for (const candidate of ordered) {
       const boardCopy = cloneBoard(board);
       const outcome = applyMove(boardCopy, candidate.move);
@@ -1854,7 +2064,7 @@
           Infinity,
           profile,
           { ...context, useFog: false },
-          new Map()
+          searchState
         );
       }
       score += candidate.prior * profile.priorWeight + rng() * profile.noise;
@@ -1869,7 +2079,14 @@
     return sample(bestMoves, rng);
   }
 
-  function evaluateFogCandidateOnHypothesis(hypothesisBoard, move, aiSide, searchProfile, context) {
+  function evaluateFogCandidateOnHypothesis(
+    hypothesisBoard,
+    move,
+    aiSide,
+    searchProfile,
+    context,
+    searchState
+  ) {
     const opponent = oppositeSide(aiSide);
     const boardCopy = cloneBoard(hypothesisBoard);
     const outcome = applyMove(boardCopy, move);
@@ -1895,7 +2112,7 @@
       Infinity,
       searchProfile,
       { ...context, useFog: false },
-      new Map()
+      searchState
     );
   }
 
@@ -1927,8 +2144,16 @@
     let bestScore = -Infinity;
     let bestMoves = [];
     for (const candidate of candidates) {
+      const searchState = createSearchState();
       const scores = hypotheses.map((hypothesis) =>
-        evaluateFogCandidateOnHypothesis(hypothesis, candidate.move, context.aiSide, searchProfile, context)
+        evaluateFogCandidateOnHypothesis(
+          hypothesis,
+          candidate.move,
+          context.aiSide,
+          searchProfile,
+          context,
+          searchState
+        )
       );
       const mean = scores.reduce((sum, value) => sum + value, 0) / scores.length;
       const variance =
