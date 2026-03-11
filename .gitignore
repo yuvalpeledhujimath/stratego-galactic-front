@@ -1,2 +1,4 @@
 node_modules/
 npm-debug.log*
+ai-model.candidate.js
+.DS_Store

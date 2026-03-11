@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "bench:ai": "node benchmark.js"
+    "bench:ai": "node benchmark.js",
+    "bench:ai:model": "node benchmark.js --mode=models --first-model=ai-model.candidate.js --second-model=ai-model.js --first-difficulty=expert --second-difficulty=expert --name=Candidate-vs-Live",
+    "train:ai": "node train-model.js --output=ai-model.candidate.js",
+    "promote:ai": "node promote-model.js --source=ai-model.candidate.js --target=ai-model.js"
   },
   "dependencies": {
     "express": "^4.21.2",

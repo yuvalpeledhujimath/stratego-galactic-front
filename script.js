@@ -3144,6 +3144,10 @@
 
         if (isLake(r, c)) {
           cell.classList.add("lake");
+          const lakeStyle = lakeStyleForCell(r, c);
+          if (lakeStyle) {
+            cell.classList.add(`lake-theme-${lakeStyle.theme}`, `lake-part-${lakeStyle.part}`);
+          }
           el.board.appendChild(cell);
           continue;
         }
@@ -3191,6 +3195,41 @@
         el.board.appendChild(cell);
       }
     }
+
+  }
+
+  function lakeStyleForCell(row, col) {
+    if (row >= 4 && row <= 5 && col >= 2 && col <= 3) {
+      return {
+        theme: "deathstar",
+        part: lakePart(row, col, 4, 2),
+      };
+    }
+
+    if (row >= 4 && row <= 5 && col >= 6 && col <= 7) {
+      return {
+        theme: "falcon",
+        part: lakePart(row, col, 4, 6),
+      };
+    }
+
+    return null;
+  }
+
+  function lakePart(row, col, topRow, leftCol) {
+    const relRow = row - topRow;
+    const relCol = col - leftCol;
+
+    if (relRow === 0 && relCol === 0) {
+      return "tl";
+    }
+    if (relRow === 0 && relCol === 1) {
+      return "tr";
+    }
+    if (relRow === 1 && relCol === 0) {
+      return "bl";
+    }
+    return "br";
   }
 
   function animateMoveTransition(move) {
