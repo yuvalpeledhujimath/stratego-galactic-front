@@ -1460,17 +1460,10 @@
 
     if (profileName === "expert") {
       return {
-        trials: 20,
+        trials: 22,
+        diversifyTop: 6,
         engineOptions: {
-          rolloutProfile: {
-            topCandidates: 2,
-            opponentSetups: 1,
-            plies: 4,
-            weight: 0.18,
-            ownDifficulty: "hard",
-            enemyDifficulty: "hard",
-            opponentProfileName: "player",
-          },
+          enableRollouts: true,
         },
       };
     }

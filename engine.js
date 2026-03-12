@@ -136,7 +136,7 @@
     easy: 5,
     medium: 10,
     hard: 20,
-    expert: 42,
+    expert: 20,
     player: 18,
   };
 
@@ -144,7 +144,7 @@
     easy: 3,
     medium: 4,
     hard: 5,
-    expert: 6,
+    expert: 5,
     player: 5,
   };
 
@@ -176,13 +176,13 @@
       opponentProfileName: "player",
     },
     expert: {
-      topCandidates: 6,
-      opponentSetups: 3,
-      plies: 12,
-      weight: 0.62,
-      ownDifficulty: "expert",
+      topCandidates: 3,
+      opponentSetups: 1,
+      plies: 6,
+      weight: 0.5,
+      ownDifficulty: "hard",
       enemyDifficulty: "hard",
-      opponentProfileName: "player",
+      opponentProfileName: "expert",
     },
     player: {
       topCandidates: 6,
@@ -235,15 +235,15 @@
       noise: 2.5,
     },
     expert: {
-      candidates: 12,
-      samples: 10,
+      candidates: 11,
+      samples: 8,
       depth: 2,
       endgameDepth: 3,
       maxBranch: 8,
       replyBranch: 10,
-      baseWeight: 0.18,
-      variancePenalty: 0.12,
-      noise: 0.18,
+      baseWeight: 0.2,
+      variancePenalty: 0.18,
+      noise: 0.05,
     },
   };
 
@@ -580,6 +580,39 @@
       return model[scaleKey];
     }
     return Number(model[scaleKey][difficulty] ?? model[scaleKey].default ?? 0);
+  }
+
+  function modelReliabilityForDifficulty(model, difficulty) {
+    if (!model) {
+      return 0;
+    }
+
+    const gamesSeen = Number((model.training && model.training.gamesSeen) || 0);
+    if (!Number.isFinite(gamesSeen) || gamesSeen <= 0) {
+      return 0;
+    }
+
+    if (difficulty === "expert") {
+      if (gamesSeen < 80) {
+        return 0;
+      }
+      if (gamesSeen < 300) {
+        return 0.35 + ((gamesSeen - 80) / 220) * 0.65;
+      }
+      return 1;
+    }
+
+    if (difficulty === "hard") {
+      if (gamesSeen < 40) {
+        return 0;
+      }
+      if (gamesSeen < 160) {
+        return 0.45 + ((gamesSeen - 40) / 120) * 0.55;
+      }
+      return 1;
+    }
+
+    return 1;
   }
 
   function dotWeights(weights, features) {
@@ -1674,7 +1707,9 @@
       return base;
     }
 
-    const scale = modelScaleForDifficulty(context.model, "valueScale", context.difficulty);
+    const scale =
+      modelScaleForDifficulty(context.model, "valueScale", context.difficulty) *
+      modelReliabilityForDifficulty(context.model, context.difficulty);
     if (!scale) {
       return base;
     }
@@ -1687,7 +1722,9 @@
       return 0;
     }
 
-    const scale = modelScaleForDifficulty(context.model, "priorScale", context.difficulty);
+    const scale =
+      modelScaleForDifficulty(context.model, "priorScale", context.difficulty) *
+      modelReliabilityForDifficulty(context.model, context.difficulty);
     if (!scale) {
       return 0;
     }
@@ -1937,15 +1974,32 @@
     }
 
     let expected = 0;
+    let secondMoment = 0;
     Object.entries(distribution.weights).forEach(([type, weight]) => {
       if (!weight) {
         return;
       }
       const result = virtualBattleResult(attacker, type);
-      expected += weight * virtualBattleScore(attacker, type, result);
+      const score = virtualBattleScore(attacker, type, result);
+      expected += weight * score;
+      secondMoment += weight * score * score;
     });
 
-    return expected / distribution.total;
+    const mean = expected / distribution.total;
+    const meanSquare = secondMoment / distribution.total;
+    const variance = Math.max(0, meanSquare - mean * mean);
+    const stdDev = Math.sqrt(variance);
+
+    const riskAversion =
+      context && context.difficulty === "expert"
+        ? 0.28
+        : context && context.difficulty === "hard"
+        ? 0.18
+        : context && context.difficulty === "medium"
+        ? 0.08
+        : 0;
+
+    return mean - stdDev * riskAversion;
   }
 
   function quickTacticalScore(board, move, side, context) {
@@ -1963,7 +2017,19 @@
     }
 
     if (shouldUseFogScoring(side, defender, context)) {
-      return expectedBattleScoreAgainstUnknown(attacker, defender, board, context, move.toR, move.toC);
+      let expected = expectedBattleScoreAgainstUnknown(attacker, defender, board, context, move.toR, move.toC);
+      const defenderMoved = hasEnemyMoved(defender, context.knowledge);
+      const expertLike = context.difficulty === "expert" || context.difficulty === "hard";
+
+      if (expertLike && !defenderMoved) {
+        if (attacker.type === "marshal" || attacker.type === "general") {
+          expected -= context.difficulty === "expert" ? 140 : 90;
+        } else if (attacker.type === "colonel") {
+          expected -= context.difficulty === "expert" ? 50 : 30;
+        }
+      }
+
+      return expected;
     }
 
     if (defender.type === "flag") {
@@ -2493,10 +2559,19 @@
 
     const unknownCounts = unknownEnemyTypeCounts(board, context.enemySide, context.knowledge);
     const unknownTotal = Object.values(unknownCounts).reduce((sum, count) => sum + count, 0);
-    const hypothesisCount = unknownTotal === 0 ? 1 : Math.max(2, searchProfile.samples - (moves.length > 44 ? 1 : 0));
+    const uncertaintyBoost = Math.min(3, Math.floor(unknownTotal / 8));
+    const mobilityPenalty = moves.length > 42 ? 2 : moves.length > 34 ? 1 : 0;
+    const hypothesisCount =
+      unknownTotal === 0
+        ? 1
+        : Math.max(3, searchProfile.samples + uncertaintyBoost - mobilityPenalty);
     const hypotheses = [];
     for (let i = 0; i < hypothesisCount; i += 1) {
-      hypotheses.push(unknownTotal === 0 ? cloneBoard(board) : sampleFogHypothesisBoard(board, context.aiSide, context.knowledge, rng));
+      hypotheses.push(
+        unknownTotal === 0
+          ? cloneBoard(board)
+          : sampleFogHypothesisBoard(board, context.aiSide, context.knowledge, rng)
+      );
     }
 
     let bestScore = -Infinity;
@@ -2514,10 +2589,19 @@
         )
       );
       const mean = scores.reduce((sum, value) => sum + value, 0) / scores.length;
+      const sortedScores = scores.slice().sort((a, b) => a - b);
+      const worst = sortedScores[0];
+      const lowerQuartile = sortedScores[Math.floor((sortedScores.length - 1) * 0.25)];
       const variance =
         scores.reduce((sum, value) => sum + (value - mean) * (value - mean), 0) / scores.length;
       const penalty = Math.sqrt(variance) * searchProfile.variancePenalty;
-      const finalScore = mean - penalty + candidate.score * searchProfile.baseWeight + rng() * searchProfile.noise;
+      const uncertainty = Math.min(1, unknownTotal / 24);
+      const robustMean =
+        mean * (1 - 0.28 * uncertainty) +
+        lowerQuartile * (0.2 * uncertainty) +
+        worst * (0.08 * uncertainty);
+      const finalScore =
+        robustMean - penalty + candidate.score * searchProfile.baseWeight + rng() * searchProfile.noise;
 
       if (finalScore > bestScore + 0.0001) {
         bestScore = finalScore;
@@ -2655,6 +2739,27 @@
       .join("|");
   }
 
+  function deploymentSimilarity(signatureA, signatureB) {
+    if (!signatureA || !signatureB) {
+      return 0;
+    }
+
+    const left = signatureA.split("|");
+    const right = signatureB.split("|");
+    const len = Math.min(left.length, right.length);
+    if (len <= 0) {
+      return 0;
+    }
+
+    let same = 0;
+    for (let i = 0; i < len; i += 1) {
+      if (left[i] === right[i]) {
+        same += 1;
+      }
+    }
+    return same / len;
+  }
+
   function buildDeploymentRecommendations(board, side, reserve, options = {}) {
     const profileName = options.profileName || "medium";
     const profile = options.profile || DEPLOYMENT_PROFILE[profileName] || DEPLOYMENT_PROFILE.medium;
@@ -2690,6 +2795,7 @@
           style: meta.style,
           flagPosition: meta.flagPosition || null,
           styleLabel: meta.style ? DEPLOYMENT_STYLE_LABEL[meta.style] || meta.style : "Balanced",
+          signature,
         },
       });
     }
@@ -2747,9 +2853,10 @@
   }
 
   function optimizeDeploymentForSide(board, side, reserve, options = {}) {
+    const profileName = options.profileName || "medium";
     const diversifyTop = Math.max(
       1,
-      options.diversifyTop || DEPLOYMENT_DIVERSITY[options.profileName || "medium"] || 1
+      options.diversifyTop || DEPLOYMENT_DIVERSITY[profileName] || 1
     );
     const rng = options.rng || Math.random;
     const recommendations = buildDeploymentRecommendations(board, side, reserve, options);
@@ -2758,15 +2865,106 @@
     }
 
     const topCount = Math.max(1, Math.min(diversifyTop, recommendations.length));
-    const top = recommendations.slice(0, topCount);
+    let top = recommendations.slice(0, topCount);
+
+    if (profileName === "expert") {
+      const scanLimit = Math.min(recommendations.length, Math.max(topCount * 6, 22));
+      const scanned = recommendations.slice(0, scanLimit);
+      const bestByFlag = new Map();
+      scanned.forEach((candidate) => {
+        const flag = candidate.meta && candidate.meta.flagPosition;
+        const key = flag ? `${flag.r},${flag.c}` : "unknown";
+        const prev = bestByFlag.get(key);
+        if (!prev || candidate.totalScore > prev.totalScore) {
+          bestByFlag.set(key, candidate);
+        }
+      });
+
+      const diverseByFlag = Array.from(bestByFlag.values()).sort((a, b) => b.totalScore - a.totalScore);
+      const blended = [];
+      const seen = new Set();
+      const addUnique = (candidate) => {
+        if (!candidate || seen.has(candidate)) {
+          return;
+        }
+        seen.add(candidate);
+        blended.push(candidate);
+      };
+
+      diverseByFlag.forEach(addUnique);
+      scanned.forEach((candidate) => {
+        if (blended.length >= Math.max(topCount + 2, 6)) {
+          return;
+        }
+        addUnique(candidate);
+      });
+
+      if (blended.length > 1) {
+        const bestScore = blended[0].totalScore;
+        const worstScore = blended[blended.length - 1].totalScore;
+        const scoreSpan = Math.max(1, bestScore - worstScore);
+        const selected = [];
+        const target = Math.min(blended.length, Math.max(topCount + 3, 7));
+
+        while (selected.length < target) {
+          let bestCandidate = null;
+          let bestValue = -Infinity;
+          for (const candidate of blended) {
+            if (selected.includes(candidate)) {
+              continue;
+            }
+
+            const quality = (candidate.totalScore - worstScore) / scoreSpan;
+            let novelty = 1;
+            if (selected.length > 0) {
+              const minSimilarity = Math.min(
+                ...selected.map((picked) =>
+                  deploymentSimilarity(candidate.meta?.signature, picked.meta?.signature)
+                )
+              );
+              novelty = 1 - minSimilarity;
+            }
+
+            const styleBonus =
+              selected.length === 0
+                ? 0
+                : selected.some((picked) => picked.meta?.style === candidate.meta?.style)
+                ? 0
+                : 0.08;
+
+            const value = quality * 0.72 + novelty * 0.24 + styleBonus + rng() * 0.02;
+            if (value > bestValue) {
+              bestValue = value;
+              bestCandidate = candidate;
+            }
+          }
+
+          if (!bestCandidate) {
+            break;
+          }
+          selected.push(bestCandidate);
+        }
+
+        if (selected.length > 0) {
+          top = selected;
+        }
+      } else if (blended.length > 0) {
+        top = blended;
+      }
+    }
+
     let chosen = top[0];
 
-    if (topCount > 1) {
+    if (top.length > 1) {
       const floor = top[top.length - 1].totalScore;
+      const best = top[0].totalScore;
+      const spread = Math.max(1, best - floor);
+      const temperature = profileName === "expert" ? 180 + spread * 0.95 : 60 + spread * 0.6;
+      const minWeightFloor = profileName === "expert" ? 0.2 : 0.02;
       const weights = top.map((entry, index) => {
-        const rankBoost = topCount - index;
-        const scoreBoost = Math.max(1, entry.totalScore - floor + 1);
-        return rankBoost * scoreBoost;
+        const rel = Math.exp((entry.totalScore - best) / temperature);
+        const rankBoost = profileName === "expert" ? 1 + (top.length - index) * 0.05 : top.length - index;
+        return rel * rankBoost + minWeightFloor;
       });
 
       let total = 0;

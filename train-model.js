@@ -3,20 +3,26 @@ const path = require("path");
 const engine = require("./engine");
 
 const DEFAULTS = {
-  games: Number(process.env.GAMES || 24),
+  games: Number(process.env.GAMES || 80),
   maxPlies: Number(process.env.MAX_PLIES || 260),
   seed: Number(process.env.SEED || 20260311),
   lrValue: Number(process.env.LR_VALUE || 0.012),
   lrPrior: Number(process.env.LR_PRIOR || 0.008),
+  valueAnchor: Number(process.env.VALUE_ANCHOR || 0.02),
+  priorAnchor: Number(process.env.PRIOR_ANCHOR || 0.015),
   discount: Number(process.env.DISCOUNT || 0.992),
   cutoffScale: Number(process.env.CUTOFF_SCALE || 1800),
   heartbeatEvery: Number(process.env.HEARTBEAT_EVERY || 100),
   suddenDeathStart: Number(process.env.SUDDEN_DEATH_START || 260),
   suddenDeathDifficulty: process.env.SUDDEN_DEATH_DIFFICULTY || "medium",
+  deployDiversifyTop: Number(process.env.DEPLOY_DIVERSIFY_TOP || 5),
+  deployRollouts: process.env.DEPLOY_ROLLOUTS === "1",
   input: process.env.INPUT || path.resolve(__dirname, "ai-model.js"),
+  opponentModel: process.env.OPPONENT_MODEL ? path.resolve(__dirname, process.env.OPPONENT_MODEL) : null,
+  opponentPool: process.env.OPPONENT_POOL || "",
   output: process.env.OUTPUT || path.resolve(__dirname, "ai-model.candidate.js"),
-  lightDifficulty: process.env.LIGHT || "hard",
-  darkDifficulty: process.env.DARK || "hard",
+  lightDifficulty: process.env.LIGHT || "expert",
+  darkDifficulty: process.env.DARK || "expert",
   reportEvery: Number(process.env.REPORT_EVERY || 4),
 };
 
@@ -52,6 +58,10 @@ function parseArgs(argv) {
       config.lrValue = Number(rawValue) || config.lrValue;
     } else if (key === "lr-prior") {
       config.lrPrior = Number(rawValue) || config.lrPrior;
+    } else if (key === "value-anchor") {
+      config.valueAnchor = Number(rawValue) || config.valueAnchor;
+    } else if (key === "prior-anchor") {
+      config.priorAnchor = Number(rawValue) || config.priorAnchor;
     } else if (key === "discount") {
       config.discount = Number(rawValue) || config.discount;
     } else if (key === "cutoff-scale") {
@@ -62,8 +72,16 @@ function parseArgs(argv) {
       config.suddenDeathStart = Number(rawValue) || config.suddenDeathStart;
     } else if (key === "sudden-death-difficulty") {
       config.suddenDeathDifficulty = rawValue;
+    } else if (key === "deploy-diversify-top") {
+      config.deployDiversifyTop = Number(rawValue) || config.deployDiversifyTop;
+    } else if (key === "deploy-rollouts") {
+      config.deployRollouts = rawValue === "1" || rawValue === "true";
     } else if (key === "input") {
       config.input = path.resolve(__dirname, rawValue);
+    } else if (key === "opponent-model") {
+      config.opponentModel = path.resolve(__dirname, rawValue);
+    } else if (key === "opponent-pool") {
+      config.opponentPool = rawValue;
     } else if (key === "output") {
       config.output = path.resolve(__dirname, rawValue);
     } else if (key === "light") {
@@ -86,6 +104,46 @@ function loadRawModel(modelPath) {
   const cacheKey = require.resolve(resolvedPath);
   delete require.cache[cacheKey];
   return require(resolvedPath);
+}
+
+function loadOpponentModel(modelPath) {
+  if (!modelPath) {
+    return { provided: false, model: null };
+  }
+  return {
+    provided: true,
+    model: engine.normalizeModel(loadRawModel(modelPath)),
+  };
+}
+
+function parseOpponentRef(ref) {
+  const normalized = String(ref || "").trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "self" || normalized === "self-play") {
+    return { label: "self-play", provided: false, model: null };
+  }
+  const resolvedPath = path.resolve(__dirname, normalized);
+  return {
+    label: resolvedPath,
+    provided: true,
+    model: engine.normalizeModel(loadRawModel(resolvedPath)),
+  };
+}
+
+function loadOpponentPool(config) {
+  if (config.opponentPool) {
+    const pool = config.opponentPool
+      .split(",")
+      .map((entry) => parseOpponentRef(entry))
+      .filter(Boolean);
+    if (pool.length > 0) {
+      return pool;
+    }
+  }
+
+  return [loadOpponentModel(config.opponentModel)];
 }
 
 function addFeatureMap(target, features, scale) {
@@ -122,6 +180,18 @@ function clipWeights(weights, limit = 12) {
   });
 }
 
+function blendWeightsTowardAnchor(weights, anchorWeights, amount) {
+  if (!amount) {
+    return;
+  }
+  const keys = new Set([...Object.keys(weights || {}), ...Object.keys(anchorWeights || {})]);
+  keys.forEach((key) => {
+    const current = weights[key] || 0;
+    const anchor = anchorWeights[key] || 0;
+    weights[key] = current + (anchor - current) * amount;
+  });
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -141,8 +211,8 @@ function applyObservedKnowledge(knowledgeBySide, attacker, defender, move, outco
   });
 
   if (outcome.kind === "battle") {
-    engine.observeBattle(knowledgeBySide.light, "light", attacker, defender);
-    engine.observeBattle(knowledgeBySide.dark, "dark", attacker, defender);
+    engine.observeBattle(knowledgeBySide.light, "light", attacker, defender, outcome);
+    engine.observeBattle(knowledgeBySide.dark, "dark", attacker, defender, outcome);
   }
 }
 
@@ -159,7 +229,7 @@ function resolveDeploymentProfile(difficulty) {
   return "easy";
 }
 
-function buildStartingBoard(lightProfile, darkProfile, rng) {
+function buildStartingBoard(lightProfile, darkProfile, rng, config) {
   const createPiece = engine.createPieceFactory();
   const lightSetup = engine.optimizeDeploymentForSide(
     engine.createBoardWithLakes(),
@@ -168,31 +238,32 @@ function buildStartingBoard(lightProfile, darkProfile, rng) {
     {
       profileName: lightProfile,
       trials: engine.DEPLOYMENT_SEARCH_TRIALS[lightProfile] || 12,
-      diversifyTop: 1,
+      diversifyTop: config.deployDiversifyTop,
       createPiece,
       rng,
-      enableRollouts: false,
+      enableRollouts: config.deployRollouts,
     }
   );
 
   const darkSetup = engine.optimizeDeploymentForSide(lightSetup.board, "dark", engine.makeFullReserve(), {
     profileName: darkProfile,
     trials: engine.DEPLOYMENT_SEARCH_TRIALS[darkProfile] || 12,
-    diversifyTop: 1,
+    diversifyTop: config.deployDiversifyTop,
     createPiece,
     rng,
-    enableRollouts: false,
+    enableRollouts: config.deployRollouts,
   });
 
   return engine.mergeBoards(lightSetup.board, darkSetup.board);
 }
 
-function playTrainingGame(config, model, seed, hooks = {}) {
+function playTrainingGame(config, model, opponentModel, useOpponentModel, trainSide, seed, hooks = {}) {
   const rng = createRng(seed);
   const board = buildStartingBoard(
     resolveDeploymentProfile(config.lightDifficulty),
     resolveDeploymentProfile(config.darkDifficulty),
-    rng
+    rng,
+    config
   );
 
   const knowledge = {
@@ -241,11 +312,11 @@ function playTrainingGame(config, model, seed, hooks = {}) {
       enemySide: engine.oppositeSide(currentTurn),
       useFog: !inSuddenDeath,
       knowledge: knowledge[currentTurn],
-      model,
+      model: !useOpponentModel || currentTurn === trainSide ? model : opponentModel,
       difficulty,
     };
 
-    const boardFeatures = engine.extractBoardFeatures(board, currentTurn);
+    const boardFeatures = engine.extractBoardFeatures(board, currentTurn, context);
     const legalFeatures = legalMoves.map((move) =>
       engine.extractMoveFeatures(board, move, currentTurn, context)
     );
@@ -255,7 +326,7 @@ function playTrainingGame(config, model, seed, hooks = {}) {
       difficulty,
       useFog: !inSuddenDeath,
       knowledge: knowledge[currentTurn],
-      model,
+      model: context.model,
       rng,
     });
 
@@ -272,12 +343,14 @@ function playTrainingGame(config, model, seed, hooks = {}) {
 
     const chosenFeatures = engine.extractMoveFeatures(board, move, currentTurn, context);
     const policyFeatures = subtractFeatureMaps(chosenFeatures, averageFeatureMaps(legalFeatures));
-    samples.push({
-      side: currentTurn,
-      boardFeatures,
-      policyFeatures,
-      ply: plies,
-    });
+    if (!useOpponentModel || currentTurn === trainSide) {
+      samples.push({
+        side: currentTurn,
+        boardFeatures,
+        policyFeatures,
+        ply: plies,
+      });
+    }
 
     const attacker = engine.copyPiece(board[move.fromR][move.fromC]);
     const defender = engine.copyPiece(board[move.toR][move.toC]);
@@ -322,6 +395,8 @@ function playTrainingGame(config, model, seed, hooks = {}) {
 
 function trainModel(config, initialModel) {
   const model = cloneModel(initialModel);
+  const anchor = cloneModel(initialModel);
+  const opponentPool = loadOpponentPool(config);
   model.enabled = true;
   model.name = "selfplay-policy-value-v1";
   model.valueScale = model.valueScale || {};
@@ -339,7 +414,17 @@ function trainModel(config, initialModel) {
   const startedAt = Date.now();
 
   for (let gameIndex = 0; gameIndex < config.games; gameIndex += 1) {
-    const result = playTrainingGame(config, model, config.seed + gameIndex * 7919, {
+    const opponentModelSpec = opponentPool[gameIndex % opponentPool.length];
+    const useOpponentModel = opponentModelSpec.provided;
+    const trainSide = useOpponentModel ? (gameIndex % 2 === 0 ? "light" : "dark") : null;
+    const result = playTrainingGame(
+      config,
+      model,
+      opponentModelSpec.model,
+      useOpponentModel,
+      trainSide,
+      config.seed + gameIndex * 7919,
+      {
       onHeartbeat(plies) {
         const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
         console.log(
@@ -369,10 +454,12 @@ function trainModel(config, initialModel) {
       const target = outcome * Math.pow(config.discount, Math.max(0, distanceToEnd));
       const valuePrediction = dotWeights(model.valueWeights, sample.boardFeatures);
       const valueError = target - valuePrediction;
-
       addFeatureMap(model.valueWeights, sample.boardFeatures, config.lrValue * valueError);
       addFeatureMap(model.priorWeights, sample.policyFeatures, config.lrPrior * target);
     });
+
+    blendWeightsTowardAnchor(model.valueWeights, anchor.valueWeights || {}, config.valueAnchor);
+    blendWeightsTowardAnchor(model.priorWeights, anchor.priorWeights || {}, config.priorAnchor);
 
     if (
       config.reportEvery > 0 &&
@@ -424,10 +511,21 @@ function main() {
   console.log(`Games: ${config.games}`);
   console.log(`Max plies: ${config.maxPlies}`);
   console.log(`Seed: ${config.seed}`);
+  console.log(`Value anchor: ${config.valueAnchor}`);
+  console.log(`Prior anchor: ${config.priorAnchor}`);
   console.log(`Cutoff scale: ${config.cutoffScale}`);
   console.log(`Sudden death start: ${config.suddenDeathStart}`);
   console.log(`Sudden death difficulty: ${config.suddenDeathDifficulty}`);
+  console.log(`Deployment diversify top: ${config.deployDiversifyTop}`);
+  console.log(`Deployment rollouts: ${config.deployRollouts ? "on" : "off"}`);
   console.log(`Input model: ${config.input}`);
+  console.log(
+    `Opponent pool: ${
+      loadOpponentPool(config)
+        .map((entry) => entry.label)
+        .join(", ") || "self-play"
+    }`
+  );
   console.log(`Light wins: ${report.lightWins}`);
   console.log(`Dark wins: ${report.darkWins}`);
   console.log(`Avg plies: ${report.avgPlies}`);

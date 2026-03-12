@@ -1,5 +1,17 @@
 const path = require("path");
-const engine = require("./engine");
+
+function loadEngine(engineRef) {
+  const resolvedPath = engineRef
+    ? path.isAbsolute(engineRef)
+      ? engineRef
+      : path.resolve(__dirname, engineRef)
+    : path.resolve(__dirname, "./engine");
+  const cacheKey = require.resolve(resolvedPath);
+  delete require.cache[cacheKey];
+  return require(resolvedPath);
+}
+
+let engine = loadEngine(null);
 
 const DEFAULT_GAMES = Number(process.env.GAMES || 8);
 const DEFAULT_MAX_PLIES = Number(process.env.MAX_PLIES || 260);
@@ -22,6 +34,11 @@ function parseArgs(argv) {
     games: DEFAULT_GAMES,
     maxPlies: DEFAULT_MAX_PLIES,
     seed: DEFAULT_SEED,
+    seeds: [DEFAULT_SEED],
+    deployDiversifyTop: Number(process.env.DEPLOY_DIVERSIFY_TOP || 5),
+    deployRollouts: process.env.DEPLOY_ROLLOUTS === "1",
+    firstEngine: "./engine.js",
+    secondEngine: "./engine.js",
     mode: "difficulty",
     sharedModel: DEFAULT_MODEL_PATH,
     firstDifficulty: "expert",
@@ -45,6 +62,24 @@ function parseArgs(argv) {
       config.maxPlies = Number(rawValue) || config.maxPlies;
     } else if (rawKey === "seed") {
       config.seed = Number(rawValue) || config.seed;
+      config.seeds = [config.seed];
+    } else if (rawKey === "seed-list") {
+      const seeds = rawValue
+        .split(",")
+        .map((value) => Number(value.trim()))
+        .filter((value) => Number.isFinite(value));
+      if (seeds.length > 0) {
+        config.seeds = seeds;
+        config.seed = seeds[0];
+      }
+    } else if (rawKey === "deploy-diversify-top") {
+      config.deployDiversifyTop = Number(rawValue) || config.deployDiversifyTop;
+    } else if (rawKey === "deploy-rollouts") {
+      config.deployRollouts = rawValue === "1" || rawValue === "true";
+    } else if (rawKey === "first-engine") {
+      config.firstEngine = rawValue;
+    } else if (rawKey === "second-engine") {
+      config.secondEngine = rawValue;
     } else if (rawKey === "mode") {
       config.mode = rawValue;
     } else if (rawKey === "model") {
@@ -85,41 +120,41 @@ function loadModelSpec(modelRef) {
   };
 }
 
-function applyObservedKnowledge(knowledgeBySide, attacker, defender, move, outcome) {
-  const observer = engine.oppositeSide(attacker.side);
-  engine.observeEnemyMovement(knowledgeBySide[observer], observer, attacker, move, {
+function applyObservedKnowledge(runtime, knowledgeBySide, attacker, defender, move, outcome) {
+  const observer = runtime.oppositeSide(attacker.side);
+  runtime.observeEnemyMovement(knowledgeBySide[observer], observer, attacker, move, {
     isAttack: !!defender,
   });
 
   if (outcome.kind === "battle") {
-    engine.observeBattle(knowledgeBySide.light, "light", attacker, defender);
-    engine.observeBattle(knowledgeBySide.dark, "dark", attacker, defender);
+    runtime.observeBattle(knowledgeBySide.light, "light", attacker, defender, outcome);
+    runtime.observeBattle(knowledgeBySide.dark, "dark", attacker, defender, outcome);
   }
 }
 
-function buildStartingBoard(lightProfile, darkProfile, rng) {
-  const createPiece = engine.createPieceFactory();
-  const lightSetup = engine.optimizeDeploymentForSide(
-    engine.createBoardWithLakes(),
+function buildStartingBoard(runtime, lightProfile, darkProfile, rng, config) {
+  const createPiece = runtime.createPieceFactory();
+  const lightSetup = runtime.optimizeDeploymentForSide(
+    runtime.createBoardWithLakes(),
     "light",
-    engine.makeFullReserve(),
+    runtime.makeFullReserve(),
     {
       profileName: lightProfile,
-      trials: engine.DEPLOYMENT_SEARCH_TRIALS[lightProfile] || 12,
-      diversifyTop: 1,
+      trials: runtime.DEPLOYMENT_SEARCH_TRIALS[lightProfile] || 12,
+      diversifyTop: config.deployDiversifyTop,
       createPiece,
       rng,
-      enableRollouts: false,
+      enableRollouts: config.deployRollouts,
     }
   );
 
-  const darkSetup = engine.optimizeDeploymentForSide(lightSetup.board, "dark", engine.makeFullReserve(), {
+  const darkSetup = runtime.optimizeDeploymentForSide(lightSetup.board, "dark", runtime.makeFullReserve(), {
     profileName: darkProfile,
-    trials: engine.DEPLOYMENT_SEARCH_TRIALS[darkProfile] || 12,
-    diversifyTop: 1,
+    trials: runtime.DEPLOYMENT_SEARCH_TRIALS[darkProfile] || 12,
+    diversifyTop: config.deployDiversifyTop,
     createPiece,
     rng,
-    enableRollouts: false,
+    enableRollouts: config.deployRollouts,
   });
 
   return engine.mergeBoards(lightSetup.board, darkSetup.board);
@@ -139,44 +174,50 @@ function resolveDeploymentProfile(difficulty) {
 }
 
 function playMatch(config) {
+  const lightEngine = config.lightEngine || engine;
+  const darkEngine = config.darkEngine || lightEngine;
+  const runtime = lightEngine;
   const rng = createRng(config.seed);
   const board = buildStartingBoard(
+    runtime,
     resolveDeploymentProfile(config.lightDifficulty),
     resolveDeploymentProfile(config.darkDifficulty),
-    rng
+    rng,
+    config
   );
 
   const knowledge = {
-    light: engine.makeKnowledgeState(),
-    dark: engine.makeKnowledgeState(),
+    light: lightEngine.makeKnowledgeState(),
+    dark: darkEngine.makeKnowledgeState(),
   };
 
   let currentTurn = "light";
   let plies = 0;
 
   while (plies < config.maxPlies) {
-    const winner = engine.winnerFromBoard(board);
+    const winner = runtime.winnerFromBoard(board);
     if (winner) {
       return {
         winner,
         plies,
         reason: "flag",
-        finalScore: engine.evaluateBoard(board, "light"),
+        finalScore: runtime.evaluateBoard(board, "light"),
       };
     }
 
-    if (!engine.hasAnyLegalMove(board, currentTurn)) {
+    if (!(currentTurn === "light" ? lightEngine : darkEngine).hasAnyLegalMove(board, currentTurn)) {
       return {
-        winner: engine.oppositeSide(currentTurn),
+        winner: runtime.oppositeSide(currentTurn),
         plies,
         reason: "no_moves",
-        finalScore: engine.evaluateBoard(board, "light"),
+        finalScore: runtime.evaluateBoard(board, "light"),
       };
     }
 
-    const move = engine.chooseAiMove(board, {
+    const sideEngine = currentTurn === "light" ? lightEngine : darkEngine;
+    const move = sideEngine.chooseAiMove(board, {
       side: currentTurn,
-      enemySide: engine.oppositeSide(currentTurn),
+      enemySide: runtime.oppositeSide(currentTurn),
       difficulty: currentTurn === "light" ? config.lightDifficulty : config.darkDifficulty,
       useFog: true,
       knowledge: knowledge[currentTurn],
@@ -186,32 +227,32 @@ function playMatch(config) {
 
     if (!move) {
       return {
-        winner: engine.oppositeSide(currentTurn),
+        winner: runtime.oppositeSide(currentTurn),
         plies,
         reason: "no_move_returned",
-        finalScore: engine.evaluateBoard(board, "light"),
+        finalScore: runtime.evaluateBoard(board, "light"),
       };
     }
 
-    const attacker = engine.copyPiece(board[move.fromR][move.fromC]);
-    const defender = engine.copyPiece(board[move.toR][move.toC]);
-    const outcome = engine.applyMove(board, move);
-    applyObservedKnowledge(knowledge, attacker, defender, move, outcome);
+    const attacker = runtime.copyPiece(board[move.fromR][move.fromC]);
+    const defender = runtime.copyPiece(board[move.toR][move.toC]);
+    const outcome = runtime.applyMove(board, move);
+    applyObservedKnowledge(sideEngine, knowledge, attacker, defender, move, outcome);
 
     if (outcome.winner) {
       return {
         winner: outcome.winner,
         plies: plies + 1,
         reason: "flag",
-        finalScore: engine.evaluateBoard(board, "light"),
+        finalScore: runtime.evaluateBoard(board, "light"),
       };
     }
 
-    currentTurn = engine.oppositeSide(currentTurn);
+    currentTurn = runtime.oppositeSide(currentTurn);
     plies += 1;
   }
 
-  const finalScore = engine.evaluateBoard(board, "light");
+  const finalScore = runtime.evaluateBoard(board, "light");
   return {
     winner: finalScore >= 0 ? "light" : "dark",
     plies: config.maxPlies,
@@ -233,6 +274,8 @@ function runSuite(suite, config) {
       darkDifficulty: swapSides ? suite.firstDifficulty : suite.secondDifficulty,
       lightModel: swapSides ? suite.secondModel : suite.firstModel,
       darkModel: swapSides ? suite.firstModel : suite.secondModel,
+      lightEngine: swapSides ? suite.secondEngine : suite.firstEngine,
+      darkEngine: swapSides ? suite.firstEngine : suite.secondEngine,
       maxPlies: config.maxPlies,
       seed: config.seed + i * 97 + suite.name.length * 17,
     });
@@ -271,21 +314,52 @@ function runSuite(suite, config) {
   return { suite, summary, results };
 }
 
+function mergeSuiteReports(suite, reports) {
+  const results = reports.flatMap((report) => report.results);
+  const summary = {
+    firstWins: 0,
+    secondWins: 0,
+    avgPlies: 0,
+    cutoffGames: 0,
+  };
+
+  reports.forEach((report) => {
+    summary.firstWins += report.summary.firstWins;
+    summary.secondWins += report.summary.secondWins;
+    summary.cutoffGames += report.summary.cutoffGames;
+  });
+
+  results.forEach((result) => {
+    summary.avgPlies += result.plies;
+  });
+
+  summary.avgPlies = Number((summary.avgPlies / Math.max(1, results.length)).toFixed(1));
+  return { suite, summary, results };
+}
+
 function printSummary(report, config) {
+  const totalGames = config.games * Math.max(1, config.seeds.length);
   console.log("Stratego AI Benchmark");
   console.log("====================");
   console.log(`Mode: ${config.mode}`);
   console.log(`Games per suite: ${config.games}`);
   console.log(`Max plies: ${config.maxPlies}`);
-  console.log(`Seed: ${config.seed}`);
+  console.log(`Deployment diversify top: ${config.deployDiversifyTop}`);
+  console.log(`Deployment rollouts: ${config.deployRollouts ? "on" : "off"}`);
+  if (config.seeds.length > 1) {
+    console.log(`Seeds: ${config.seeds.join(", ")}`);
+    console.log(`Total games per suite: ${totalGames}`);
+  } else {
+    console.log(`Seed: ${config.seed}`);
+  }
   console.log("");
 
   report.forEach(({ suite, summary }) => {
-    const firstRate = ((summary.firstWins / config.games) * 100).toFixed(1);
-    const secondRate = ((summary.secondWins / config.games) * 100).toFixed(1);
+    const firstRate = ((summary.firstWins / totalGames) * 100).toFixed(1);
+    const secondRate = ((summary.secondWins / totalGames) * 100).toFixed(1);
     console.log(`${suite.name}`);
-    console.log(`  ${suite.firstDisplay}: ${summary.firstWins}/${config.games} wins (${firstRate}%)`);
-    console.log(`  ${suite.secondDisplay}: ${summary.secondWins}/${config.games} wins (${secondRate}%)`);
+    console.log(`  ${suite.firstDisplay}: ${summary.firstWins}/${totalGames} wins (${firstRate}%)`);
+    console.log(`  ${suite.secondDisplay}: ${summary.secondWins}/${totalGames} wins (${secondRate}%)`);
     console.log(`  Avg plies: ${summary.avgPlies}`);
     console.log(`  Eval cutoffs: ${summary.cutoffGames}`);
     console.log("");
@@ -325,12 +399,16 @@ function makeDifficultySuites(sharedModelSpec) {
 }
 
 function makeModelSuite(config, firstModelSpec, secondModelSpec) {
+  const firstEngine = loadEngine(config.firstEngine);
+  const secondEngine = loadEngine(config.secondEngine);
   return createSuite({
     name: config.name.replace(/-/g, " "),
     firstDifficulty: config.firstDifficulty,
     secondDifficulty: config.secondDifficulty,
     firstModel: firstModelSpec.model,
     secondModel: secondModelSpec.model,
+    firstEngine,
+    secondEngine,
     firstDisplay: `${config.firstDifficulty} [${firstModelSpec.label}]`,
     secondDisplay: `${config.secondDifficulty} [${secondModelSpec.label}]`,
   });
@@ -343,7 +421,12 @@ function main() {
       ? [makeModelSuite(config, loadModelSpec(config.firstModel), loadModelSpec(config.secondModel))]
       : makeDifficultySuites(loadModelSpec(config.sharedModel));
 
-  const report = suites.map((suite) => runSuite(suite, config));
+  const report = suites.map((suite) =>
+    mergeSuiteReports(
+      suite,
+      config.seeds.map((seed) => runSuite(suite, { ...config, seed }))
+    )
+  );
   printSummary(report, config);
 }
 
