@@ -363,9 +363,19 @@
   }
 
   function makeKnowledgeState(seed = {}) {
+    const revealedEnemyLosses = makeZeroCountMap();
+    Object.entries(seed.revealedEnemyLosses || {}).forEach(([type, count]) => {
+      if (Object.prototype.hasOwnProperty.call(revealedEnemyLosses, type)) {
+        revealedEnemyLosses[type] = Number(count || 0);
+      }
+    });
+
     return {
       knownEnemyIds: new Set(seed.knownEnemyIds || []),
       movedEnemyIds: new Set(seed.movedEnemyIds || []),
+      defeatedEnemyIds: new Set(seed.defeatedEnemyIds || []),
+      knownEnemyTypes: { ...(seed.knownEnemyTypes || {}) },
+      revealedEnemyLosses,
       enemyProfiles: { ...(seed.enemyProfiles || {}) },
     };
   }
@@ -374,6 +384,12 @@
     if (!knowledge) {
       return makeKnowledgeState();
     }
+    const revealedEnemyLosses = makeZeroCountMap();
+    Object.entries(knowledge.revealedEnemyLosses || {}).forEach(([type, count]) => {
+      if (Object.prototype.hasOwnProperty.call(revealedEnemyLosses, type)) {
+        revealedEnemyLosses[type] = Number(count || 0);
+      }
+    });
     return {
       knownEnemyIds:
         knowledge.knownEnemyIds instanceof Set
@@ -383,6 +399,12 @@
         knowledge.movedEnemyIds instanceof Set
           ? knowledge.movedEnemyIds
           : new Set(knowledge.movedEnemyIds || []),
+      defeatedEnemyIds:
+        knowledge.defeatedEnemyIds instanceof Set
+          ? knowledge.defeatedEnemyIds
+          : new Set(knowledge.defeatedEnemyIds || []),
+      knownEnemyTypes: knowledge.knownEnemyTypes || {},
+      revealedEnemyLosses,
       enemyProfiles: knowledge.enemyProfiles || {},
     };
   }
@@ -452,6 +474,7 @@
 
     if (distance > 1) {
       known.knownEnemyIds.add(piece.id);
+      known.knownEnemyTypes[piece.id] = "scout";
       known.movedEnemyIds.delete(piece.id);
       return;
     }
@@ -461,7 +484,19 @@
     }
   }
 
-  function observeBattle(knowledge, observerSide, attacker, defender) {
+  function markEnemyDefeated(knowledge, piece) {
+    if (!piece || knowledge.defeatedEnemyIds.has(piece.id)) {
+      return;
+    }
+
+    knowledge.defeatedEnemyIds.add(piece.id);
+    knowledge.movedEnemyIds.delete(piece.id);
+    if (piece.type && Object.prototype.hasOwnProperty.call(knowledge.revealedEnemyLosses, piece.type)) {
+      knowledge.revealedEnemyLosses[piece.type] += 1;
+    }
+  }
+
+  function observeBattle(knowledge, observerSide, attacker, defender, outcome = null) {
     const known = normalizeKnowledge(knowledge);
     [attacker, defender].forEach((piece) => {
       if (!piece || piece.side === observerSide) {
@@ -471,18 +506,57 @@
       profile.lastRow = null;
       profile.lastCol = null;
       known.knownEnemyIds.add(piece.id);
+      known.knownEnemyTypes[piece.id] = piece.type;
       if (piece.type === "bomb" || piece.type === "flag") {
         known.movedEnemyIds.delete(piece.id);
       }
     });
+
+    if (!outcome || outcome.kind !== "battle") {
+      return;
+    }
+
+    if (
+      attacker &&
+      attacker.side !== observerSide &&
+      (outcome.result === "defender" || outcome.result === "both")
+    ) {
+      markEnemyDefeated(known, attacker);
+    }
+
+    if (
+      defender &&
+      defender.side !== observerSide &&
+      (outcome.result === "attacker" || outcome.result === "captureFlag" || outcome.result === "both")
+    ) {
+      markEnemyDefeated(known, defender);
+    }
   }
 
   function isKnownEnemy(piece, knowledge) {
-    return !!piece && !!knowledge && knowledge.knownEnemyIds.has(piece.id);
+    const knownIds = knowledge && knowledge.knownEnemyIds instanceof Set ? knowledge.knownEnemyIds : null;
+    return (
+      !!piece &&
+      !!knowledge &&
+      ((knownIds && knownIds.has(piece.id)) ||
+        Object.prototype.hasOwnProperty.call(knowledge.knownEnemyTypes || {}, piece.id))
+    );
   }
 
   function hasEnemyMoved(piece, knowledge) {
-    return !!piece && !!knowledge && knowledge.movedEnemyIds.has(piece.id);
+    return (
+      !!piece &&
+      !!knowledge &&
+      knowledge.movedEnemyIds instanceof Set &&
+      knowledge.movedEnemyIds.has(piece.id)
+    );
+  }
+
+  function getKnownEnemyType(piece, knowledge) {
+    if (!piece || !knowledge || !knowledge.knownEnemyTypes) {
+      return null;
+    }
+    return knowledge.knownEnemyTypes[piece.id] || null;
   }
 
   function normalizeModel(model) {
@@ -1819,17 +1893,24 @@
   }
 
   function unknownEnemyTypeCounts(board, enemySide, knowledge) {
-    const counts = makeZeroCountMap();
+    const known = normalizeKnowledge(knowledge);
+    const counts = makeFullReserve();
+
+    Object.entries(known.revealedEnemyLosses).forEach(([type, count]) => {
+      counts[type] = Math.max(0, counts[type] - count);
+    });
+
     for (let r = 0; r < BOARD_SIZE; r += 1) {
       for (let c = 0; c < BOARD_SIZE; c += 1) {
         const piece = board[r][c];
         if (!piece || piece === "lake" || piece.side !== enemySide) {
           continue;
         }
-        if (isKnownEnemy(piece, knowledge)) {
+        const knownType = getKnownEnemyType(piece, known);
+        if (knownType) {
+          counts[knownType] = Math.max(0, counts[knownType] - 1);
           continue;
         }
-        counts[piece.type] += 1;
       }
     }
     return counts;
@@ -2733,6 +2814,7 @@
     observeBattle,
     isKnownEnemy,
     hasEnemyMoved,
+    getKnownEnemyType,
     oppositeSide,
     isInside,
     isLake,
@@ -2753,6 +2835,7 @@
     extractBoardFeatures,
     extractMoveFeatures,
     normalizeModel,
+    estimateUnknownEnemyTypeCounts: unknownEnemyTypeCounts,
     buildDeploymentRecommendations,
     optimizeDeploymentForSide,
     chooseAiMove,

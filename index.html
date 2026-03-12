@@ -24,6 +24,7 @@
         <p class="label">Game Mode</p>
         <div class="option-row" id="modeOptions">
           <button class="choice-btn active" data-mode="pvc">Player vs Computer</button>
+          <button class="choice-btn" data-mode="pvchat">Player vs ChatGPT</button>
           <button class="choice-btn" data-mode="online">Online (PIN)</button>
         </div>
       </div>
@@ -39,11 +40,28 @@
       </div>
 
       <div class="option-group hidden" id="sideGroup">
-        <p class="label">Your Side (PvC)</p>
+        <p id="sideGroupLabel" class="label">Your Side (PvC)</p>
         <div class="option-row" id="sideOptions">
           <button class="choice-btn active" data-side="light">Light Side</button>
           <button class="choice-btn" data-side="dark">Dark Side</button>
         </div>
+      </div>
+
+      <div class="option-group hidden" id="chatGroup">
+        <p class="label">ChatGPT Opponent</p>
+        <div class="option-row chat-key-row">
+          <input
+            id="chatApiKeyInput"
+            class="online-input chat-input"
+            type="password"
+            placeholder="OpenAI API key"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="clearChatKeyBtn" class="action" type="button">Forget Key</button>
+        </div>
+        <p class="online-status">Model: <strong>gpt-5.4</strong>. Stored only in this browser and sent only when ChatGPT must choose a setup or move.</p>
+        <p id="chatStatus" class="online-status">Enter an OpenAI API key to enable Player vs ChatGPT.</p>
       </div>
 
       <div class="option-group hidden" id="onlineGroup">

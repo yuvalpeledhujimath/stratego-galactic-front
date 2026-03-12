@@ -1,6 +1,8 @@
 (() => {
   const BOARD_SIZE = 10;
   const MOVE_ANIMATION_MS = 500;
+  const CHATGPT_MODEL = "gpt-5.4";
+  const CHAT_API_KEY_STORAGE_KEY = "stratego.chatgpt.apiKey";
   const DIRECTIONS = [
     [1, 0],
     [-1, 0],
@@ -286,6 +288,13 @@
     },
     lastStep: null,
     aiKnowledge: engine.makeKnowledgeState(),
+    chat: {
+      apiKey: loadStoredSetting(CHAT_API_KEY_STORAGE_KEY),
+      model: CHATGPT_MODEL,
+      status: "",
+      thinkingLabel: "",
+      requestToken: 0,
+    },
     online: {
       socket: null,
       connected: false,
@@ -306,10 +315,15 @@
     gamePanel: document.getElementById("gamePanel"),
     difficultyGroup: document.getElementById("difficultyGroup"),
     sideGroup: document.getElementById("sideGroup"),
+    sideGroupLabel: document.getElementById("sideGroupLabel"),
+    chatGroup: document.getElementById("chatGroup"),
     onlineGroup: document.getElementById("onlineGroup"),
     modeOptions: document.getElementById("modeOptions"),
     difficultyOptions: document.getElementById("difficultyOptions"),
     sideOptions: document.getElementById("sideOptions"),
+    chatApiKeyInput: document.getElementById("chatApiKeyInput"),
+    clearChatKeyBtn: document.getElementById("clearChatKeyBtn"),
+    chatStatus: document.getElementById("chatStatus"),
     createOnlineBtn: document.getElementById("createOnlineBtn"),
     joinOnlineBtn: document.getElementById("joinOnlineBtn"),
     joinPinInput: document.getElementById("joinPinInput"),
@@ -378,6 +392,20 @@
 
     el.joinPinInput.addEventListener("input", () => {
       el.joinPinInput.value = el.joinPinInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    });
+
+    el.chatApiKeyInput.value = state.chat.apiKey;
+    el.chatApiKeyInput.addEventListener("input", () => {
+      state.chat.apiKey = (el.chatApiKeyInput.value || "").trim();
+      storeSetting(CHAT_API_KEY_STORAGE_KEY, state.chat.apiKey);
+      renderChatSetupStatus();
+    });
+
+    el.clearChatKeyBtn.addEventListener("click", () => {
+      state.chat.apiKey = "";
+      el.chatApiKeyInput.value = "";
+      storeSetting(CHAT_API_KEY_STORAGE_KEY, "");
+      renderChatSetupStatus();
     });
 
     el.startBtn.addEventListener("click", () => {
@@ -481,19 +509,29 @@
 
   function syncModeUI() {
     const pvc = state.mode === "pvc";
+    const pvchat = state.mode === "pvchat";
     const online = state.mode === "online";
     el.difficultyGroup.classList.toggle("hidden", !pvc);
-    el.sideGroup.classList.toggle("hidden", !pvc);
+    el.sideGroup.classList.toggle("hidden", !(pvc || pvchat));
+    el.chatGroup.classList.toggle("hidden", !pvchat);
     el.onlineGroup.classList.toggle("hidden", !online);
-    el.startBtn.textContent = online ? "Start Online Match" : "Start Battle";
+    el.sideGroupLabel.textContent = pvchat ? "Your Side (vs ChatGPT)" : "Your Side (PvC)";
+    el.startBtn.textContent = online
+      ? "Start Online Match"
+      : pvchat
+      ? "Start ChatGPT Match"
+      : "Start Battle";
     renderOnlineSetupStatus();
+    renderChatSetupStatus();
   }
 
   function resetToSetup() {
+    invalidatePendingAiWork();
     state.phase = "setup";
     state.gameOver = false;
     state.winner = null;
     state.aiThinking = false;
+    state.chat.thinkingLabel = "";
     state.animatingMove = false;
     state.revealPending = false;
     state.revealContext = null;
@@ -527,6 +565,7 @@
       return;
     }
 
+    invalidatePendingAiWork();
     pieceIdCounter = 1;
     state.board = createBoardWithLakes();
     state.selected = null;
@@ -534,6 +573,7 @@
     state.gameOver = false;
     state.winner = null;
     state.aiThinking = false;
+    state.chat.thinkingLabel = "";
     state.animatingMove = false;
     state.battleLog = [];
     state.lastBattle = null;
@@ -564,9 +604,15 @@
     state.viewerSide = state.humanSide;
     state.deploySelectedType = firstAvailableType(state.humanSide);
     addLog(
-      `Deployment phase: Place your ${sideLabel(state.humanSide)} units. AI (${difficultyLabel(
-        state.difficulty
-      )}) will deploy strategically.`
+      state.mode === "pvchat"
+        ? `Deployment phase: Place your ${sideLabel(
+            state.humanSide
+          )} units. ChatGPT will review expert deployment and move suggestions for ${sideLabel(
+            state.aiSide
+          )}.`
+        : `Deployment phase: Place your ${sideLabel(state.humanSide)} units. AI (${difficultyLabel(
+            state.difficulty
+          )}) will deploy strategically.`
     );
 
     el.setupPanel.classList.add("hidden");
@@ -714,7 +760,7 @@
       !!state.online.pin;
 
     if (!inOnline) {
-      el.startBtn.disabled = false;
+      updateStartButtonState();
       return;
     }
 
@@ -738,6 +784,40 @@
     el.startBtn.disabled = !canStartOnline;
   }
 
+  function renderChatSetupStatus() {
+    if (!el.chatStatus || !el.startBtn) {
+      return;
+    }
+
+    if (state.mode !== "pvchat") {
+      updateStartButtonState();
+      return;
+    }
+
+    if (!state.chat.apiKey) {
+      state.chat.status = "Enter an OpenAI API key to enable Player vs ChatGPT.";
+    } else {
+      state.chat.status =
+        "Ready. ChatGPT will review expert deployments and every computer move using only public information.";
+    }
+
+    el.chatStatus.textContent = state.chat.status;
+    updateStartButtonState();
+  }
+
+  function updateStartButtonState() {
+    if (state.mode === "online") {
+      return;
+    }
+
+    if (state.mode === "pvchat") {
+      el.startBtn.disabled = !state.chat.apiKey;
+      return;
+    }
+
+    el.startBtn.disabled = false;
+  }
+
   function startOnlineGameAsHost() {
     if (state.mode !== "online") {
       return;
@@ -758,6 +838,7 @@
       return;
     }
 
+    invalidatePendingAiWork();
     pieceIdCounter = 1;
     state.board = createBoardWithLakes();
     state.selected = null;
@@ -765,6 +846,7 @@
     state.gameOver = false;
     state.winner = null;
     state.aiThinking = false;
+    state.chat.thinkingLabel = "";
     state.animatingMove = false;
     state.battleLog = [];
     state.lastBattle = null;
@@ -948,7 +1030,7 @@
       return;
     }
 
-    if (state.mode === "pvc" && state.currentTurn !== state.humanSide) {
+    if ((state.mode === "pvc" || state.mode === "pvchat") && state.currentTurn !== state.humanSide) {
       return;
     }
     if (state.mode === "online" && state.currentTurn !== state.humanSide) {
@@ -1057,6 +1139,12 @@
       return;
     }
 
+    if (state.mode === "pvchat") {
+      beginChatDeployment();
+      syncOnlineStateIfNeeded();
+      return;
+    }
+
     if (state.mode === "online") {
       if (side === "light") {
         state.deploymentSide = "dark";
@@ -1087,6 +1175,170 @@
     startBattlePhase();
   }
 
+  function beginChatDeployment() {
+    if (!state.aiSide) {
+      return;
+    }
+
+    const requestToken = beginAiThinking(
+      `ChatGPT is reviewing expert deployment options for ${sideLabel(state.aiSide)}...`
+    );
+    state.deploymentSide = state.aiSide;
+    state.deploySelectedType = null;
+    renderAll();
+
+    window.setTimeout(async () => {
+      if (!isActiveAiRequest(requestToken) || state.phase !== "deploy" || state.deploymentSide !== state.aiSide) {
+        return;
+      }
+
+      const result = await chooseChatDeployment();
+      if (!isActiveAiRequest(requestToken) || state.phase !== "deploy") {
+        return;
+      }
+
+      finishAiThinking();
+
+      if (!result) {
+        endGame(state.humanSide, `${sideLabel(state.aiSide)} could not complete deployment.`);
+        return;
+      }
+
+      applyDeploymentRecommendation(state.aiSide, result.recommendation);
+      addLog(result.logLine);
+      startBattlePhase();
+    }, 180);
+  }
+
+  async function chooseChatDeployment() {
+    const side = state.aiSide;
+    if (!side) {
+      return null;
+    }
+
+    const profileName = "expert";
+    const profile = DEPLOYMENT_PROFILE[profileName];
+    const searchOptions = getUiDeploymentSearchOptions(profileName);
+    const trials =
+      searchOptions.trials ??
+      DEPLOYMENT_SEARCH_TRIALS[profileName] ??
+      DEPLOYMENT_SEARCH_TRIALS.medium;
+    const recommendations = engine.buildDeploymentRecommendations(state.board, side, state.deployReserve[side], {
+      ...(searchOptions.engineOptions || {}),
+      profile,
+      profileName,
+      trials,
+      createPiece,
+    });
+
+    if (!recommendations.length) {
+      return null;
+    }
+
+    const options = recommendations.slice(0, 5).map((recommendation, index) => ({
+      id: `D${index + 1}`,
+      recommendation,
+      summary: summarizeDeploymentRecommendation(recommendation, side, `D${index + 1}`, index === 0),
+    }));
+    const expertOption = options[0];
+
+    try {
+      const decision = await requestChatGptDecision("deployment", {
+        mode: "Player vs ChatGPT",
+        model: state.chat.model,
+        yourSide: sideLabel(side),
+        enemySide: sideLabel(state.humanSide),
+        expertSuggestionId: expertOption.id,
+        expertSuggestion: expertOption.summary,
+        options: options.map((entry) => entry.summary),
+      });
+
+      const chosen = options.find((entry) => entry.id === decision.selectedOptionId) || expertOption;
+      if (chosen.id === expertOption.id) {
+        return {
+          recommendation: chosen.recommendation,
+          logLine: `ChatGPT approved the expert deployment (${chosen.summary.style} at ${chosen.summary.flagAt}).`,
+        };
+      }
+
+      return {
+        recommendation: chosen.recommendation,
+        logLine: `ChatGPT overrode the expert deployment and chose ${chosen.id} (${chosen.summary.style} at ${chosen.summary.flagAt}).`,
+      };
+    } catch (error) {
+      setChatStatusFromError(error, "Deployment fallback: expert setup used.");
+      return {
+        recommendation: expertOption.recommendation,
+        logLine: `ChatGPT deployment failed. Expert deployment used instead.`,
+      };
+    }
+  }
+
+  function summarizeDeploymentRecommendation(recommendation, side, id, expertSuggested) {
+    const board = recommendation.board;
+    const flag = engine.findFlag(board, side);
+    const marshal = findPiecePosition(board, side, "marshal");
+    const general = findPiecePosition(board, side, "general");
+    const bombGuards = flag ? countAdjacentFriendlyType(board, flag, side, "bomb") : 0;
+    const frontMovables = countFrontlineMovables(board, side);
+
+    return {
+      id,
+      expertSuggested,
+      style: recommendation.meta?.styleLabel || recommendation.meta?.style || "Balanced",
+      flagAt: flag ? coordToText(flag.r, flag.c) : "unknown",
+      marshalAt: marshal ? coordToText(marshal.r, marshal.c) : "unknown",
+      generalAt: general ? coordToText(general.r, general.c) : "unknown",
+      bombGuards,
+      frontMovables,
+      placements: serializeFriendlyDeployment(board, side),
+    };
+  }
+
+  function serializeFriendlyDeployment(board, side) {
+    const placements = [];
+    for (let r = 0; r < BOARD_SIZE; r += 1) {
+      for (let c = 0; c < BOARD_SIZE; c += 1) {
+        const piece = board[r][c];
+        if (!piece || piece === "lake" || piece.side !== side) {
+          continue;
+        }
+        placements.push({
+          coord: coordToText(r, c),
+          type: piece.type,
+          rank: battleNumberFromType(piece.type),
+        });
+      }
+    }
+    return placements.sort((left, right) => left.coord.localeCompare(right.coord));
+  }
+
+  function applyDeploymentRecommendation(side, recommendation) {
+    if (!recommendation || !recommendation.board) {
+      return;
+    }
+
+    for (let r = 0; r < BOARD_SIZE; r += 1) {
+      for (let c = 0; c < BOARD_SIZE; c += 1) {
+        if (!isDeploymentCellForSide(r, c, side)) {
+          continue;
+        }
+
+        const piece = recommendation.board[r][c];
+        if (piece && piece !== "lake" && piece.side === side) {
+          state.board[r][c] = piece;
+        } else if (state.board[r][c] && state.board[r][c] !== "lake" && state.board[r][c].side === side) {
+          state.board[r][c] = null;
+        }
+      }
+    }
+
+    state.deployReserve[side] = recommendation.reserve ? { ...recommendation.reserve } : makeZeroCountMap();
+    if (state.deploymentSide === side) {
+      state.deploySelectedType = firstAvailableType(side);
+    }
+  }
+
   function startBattlePhase() {
     state.deploymentSide = null;
     state.deploySelectedType = null;
@@ -1095,7 +1347,7 @@
     state.legalTargets = [];
     state.revealContext = null;
 
-    if (state.mode === "pvc") {
+    if (state.mode === "pvc" || state.mode === "pvchat") {
       state.currentTurn = state.humanSide;
       state.viewerSide = state.humanSide;
       state.revealPending = false;
@@ -1930,7 +2182,7 @@
 
     if (outcome.kind === "battle") {
       if (isAiFogEnabled()) {
-        noteAiKnowledgeFromBattle(attacker, defender);
+        noteAiKnowledgeFromBattle(attacker, defender, outcome);
       }
       state.lastBattle = buildLastBattle(move, attacker, defender, outcome);
       scheduleInventoryLoss(attacker, defender, outcome);
@@ -2149,7 +2401,10 @@
     state.aiThinking = false;
     state.revealPending = false;
     state.revealContext = null;
-    state.viewerSide = state.mode === "pvc" || state.mode === "online" ? state.humanSide : winnerSide;
+    state.viewerSide =
+      state.mode === "pvc" || state.mode === "pvchat" || state.mode === "online"
+        ? state.humanSide
+        : winnerSide;
     hideOverlay();
     addLog(`${sideLabel(winnerSide)} wins. ${reason}`);
     renderAll();
@@ -2161,8 +2416,12 @@
       return;
     }
 
-    state.aiThinking = true;
-    renderHud();
+    const requestToken = beginAiThinking(
+      state.mode === "pvchat"
+        ? "ChatGPT is reviewing the expert move..."
+        : "Computer is calculating a move..."
+    );
+    renderAll();
 
     const delayByLevel = {
       easy: 350,
@@ -2171,20 +2430,25 @@
       expert: 850,
     };
 
-    window.setTimeout(() => {
+    const delay = state.mode === "pvchat" ? 220 : delayByLevel[state.difficulty] ?? 500;
+
+    window.setTimeout(async () => {
       if (
         state.gameOver ||
-        state.mode !== "pvc" ||
+        (state.mode !== "pvc" && state.mode !== "pvchat") ||
         state.phase !== "battle" ||
         state.currentTurn !== state.aiSide ||
         state.animatingMove ||
-        !state.aiThinking
+        !isActiveAiRequest(requestToken)
       ) {
         return;
       }
 
-      const move = chooseAiMove();
-      state.aiThinking = false;
+      const move = state.mode === "pvchat" ? await chooseChatGptMove() : chooseAiMove();
+      if (!isActiveAiRequest(requestToken)) {
+        return;
+      }
+      finishAiThinking();
 
       if (!move) {
         endGame(state.humanSide, `${sideLabel(state.aiSide)} cannot make any legal move.`);
@@ -2192,19 +2456,65 @@
       }
 
       performMove(move);
-    }, delayByLevel[state.difficulty] ?? 500);
+    }, delay);
   }
 
-  function chooseAiMove() {
+  function chooseAiMove(options = {}) {
     return engine.chooseAiMove(state.board, {
       side: state.aiSide,
       enemySide: state.humanSide,
-      difficulty: state.difficulty,
+      difficulty: options.difficulty || state.difficulty,
       useFog: isAiFogEnabled(),
       knowledge: state.aiKnowledge,
       model: aiModel,
       rng: Math.random,
     });
+  }
+
+  async function chooseChatGptMove() {
+    const legalMoves = engine.getAllLegalMoves(state.board, state.aiSide);
+    if (!legalMoves.length) {
+      return null;
+    }
+
+    const expertMove = chooseAiMove({ difficulty: "expert" });
+    if (!expertMove) {
+      return null;
+    }
+
+    const moveOptions = legalMoves.map((move, index) => ({
+      id: `M${index + 1}`,
+      move,
+      summary: summarizeMoveOption(move, `M${index + 1}`, sameMove(move, expertMove)),
+    }));
+    const expertOption = moveOptions.find((entry) => sameMove(entry.move, expertMove)) || moveOptions[0];
+
+    try {
+      const decision = await requestChatGptDecision("move", {
+        mode: "Player vs ChatGPT",
+        model: state.chat.model,
+        yourSide: sideLabel(state.aiSide),
+        enemySide: sideLabel(state.humanSide),
+        sideToMove: sideLabel(state.aiSide),
+        recentLog: state.battleLog.slice(0, 6).reverse(),
+        publicState: buildChatPublicState(),
+        expertSuggestionId: expertOption.id,
+        expertSuggestion: expertOption.summary,
+        legalMoves: moveOptions.map((entry) => entry.summary),
+      });
+
+      const chosen = moveOptions.find((entry) => entry.id === decision.selectedMoveId) || expertOption;
+      if (chosen.id !== expertOption.id) {
+        addLog(`ChatGPT overrode the expert move and chose ${chosen.summary.notation}.`);
+      } else {
+        addLog(`ChatGPT approved the expert move ${chosen.summary.notation}.`);
+      }
+      return chosen.move;
+    } catch (error) {
+      setChatStatusFromError(error, "Move fallback: expert move used.");
+      addLog("ChatGPT move failed. Expert fallback used instead.");
+      return expertOption.move;
+    }
   }
 
   function chooseAiMoveFogAware(moves) {
@@ -3063,6 +3373,8 @@
   function renderHud() {
     if (state.mode === "pvc") {
       el.hudMode.textContent = `PvC (${difficultyLabel(state.difficulty)})`;
+    } else if (state.mode === "pvchat") {
+      el.hudMode.textContent = "PvChat (GPT-5.4)";
     } else if (state.mode === "online") {
       const pinPart = state.online.pin ? ` PIN ${state.online.pin}` : "";
       el.hudMode.textContent = `Online PvP${pinPart}`;
@@ -3081,6 +3393,8 @@
       const remaining = reserveTotal(state.deploymentSide);
       if (state.mode === "online" && state.deploymentSide !== state.humanSide) {
         el.hudStatus.textContent = `Waiting for ${sideLabel(state.deploymentSide)} commander...`;
+      } else if (state.mode === "pvchat" && state.aiThinking) {
+        el.hudStatus.textContent = state.chat.thinkingLabel || "ChatGPT is preparing the opposing deployment...";
       } else if (state.revealPending) {
         el.hudStatus.textContent = `Pass device to ${sideLabel(state.deploymentSide)}.`;
       } else if (remaining > 0) {
@@ -3114,8 +3428,11 @@
       return;
     }
 
-    if (state.mode === "pvc" && state.currentTurn === state.aiSide) {
-      el.hudStatus.textContent = "Computer is calculating a move...";
+    if ((state.mode === "pvc" || state.mode === "pvchat") && state.currentTurn === state.aiSide) {
+      el.hudStatus.textContent =
+        state.mode === "pvchat"
+          ? state.chat.thinkingLabel || "ChatGPT is reviewing the expert move..."
+          : "Computer is calculating a move...";
       return;
     }
 
@@ -3333,8 +3650,11 @@
     const side = state.deploymentSide;
     const remaining = reserveTotal(side);
     const waitingOnlineSide = state.mode === "online" && side !== state.humanSide;
+    const waitingChatSide = state.mode === "pvchat" && side === state.aiSide;
     if (waitingOnlineSide) {
       el.deployInfo.textContent = `Waiting for ${sideLabel(side)} commander to deploy.`;
+    } else if (waitingChatSide && state.aiThinking) {
+      el.deployInfo.textContent = state.chat.thinkingLabel || `ChatGPT is deploying ${sideLabel(side)}.`;
     } else if (state.revealPending) {
       el.deployInfo.textContent = `Awaiting handoff. Reveal for ${sideLabel(side)} commander.`;
     } else {
@@ -3350,7 +3670,7 @@
       if (state.deploySelectedType === spec.type) {
         btn.classList.add("active");
       }
-      btn.disabled = left <= 0 || state.revealPending || waitingOnlineSide;
+      btn.disabled = left <= 0 || state.revealPending || waitingOnlineSide || waitingChatSide || state.aiThinking;
       btn.textContent = `[${battleNumberFromType(spec.type)}] ${UNIT_SHORT_NAME[spec.type]} x${left}`;
       btn.addEventListener("click", () => {
         if (left <= 0) {
@@ -3362,9 +3682,11 @@
       el.piecePalette.appendChild(btn);
     });
 
-    el.confirmDeployBtn.disabled = remaining > 0 || state.revealPending || waitingOnlineSide;
-    el.autoDeployBtn.disabled = remaining === 0 || state.revealPending || waitingOnlineSide;
-    el.clearDeployBtn.disabled = state.revealPending || waitingOnlineSide;
+    el.confirmDeployBtn.disabled =
+      remaining > 0 || state.revealPending || waitingOnlineSide || waitingChatSide || state.aiThinking;
+    el.autoDeployBtn.disabled =
+      remaining === 0 || state.revealPending || waitingOnlineSide || waitingChatSide || state.aiThinking;
+    el.clearDeployBtn.disabled = state.revealPending || waitingOnlineSide || waitingChatSide || state.aiThinking;
   }
 
   function renderDuelPanel() {
@@ -3435,7 +3757,7 @@
       return true;
     }
 
-    if (state.mode === "pvc") {
+    if (state.mode === "pvc" || state.mode === "pvchat") {
       return piece.side === state.humanSide;
     }
 
@@ -3475,7 +3797,7 @@
       return false;
     }
 
-    if (state.mode === "pvc" && state.currentTurn !== state.humanSide) {
+    if ((state.mode === "pvc" || state.mode === "pvchat") && state.currentTurn !== state.humanSide) {
       return false;
     }
     if (state.mode === "online" && state.currentTurn !== state.humanSide) {
@@ -3613,7 +3935,7 @@
   }
 
   function isAiFogEnabled() {
-    return state.mode === "pvc" && !!state.aiSide && !!state.humanSide;
+    return (state.mode === "pvc" || state.mode === "pvchat") && !!state.aiSide && !!state.humanSide;
   }
 
   function noteAiKnowledgeFromMovement(attacker, move, defender) {
@@ -3625,11 +3947,211 @@
     });
   }
 
-  function noteAiKnowledgeFromBattle(attacker, defender) {
+  function noteAiKnowledgeFromBattle(attacker, defender, outcome) {
     if (!state.aiSide) {
       return;
     }
-    engine.observeBattle(state.aiKnowledge, state.aiSide, attacker, defender);
+    engine.observeBattle(state.aiKnowledge, state.aiSide, attacker, defender, outcome);
+  }
+
+  function beginAiThinking(label) {
+    state.aiThinking = true;
+    state.chat.thinkingLabel = label || "";
+    state.chat.requestToken += 1;
+    return state.chat.requestToken;
+  }
+
+  function finishAiThinking() {
+    state.aiThinking = false;
+    state.chat.thinkingLabel = "";
+  }
+
+  function invalidatePendingAiWork() {
+    state.chat.requestToken += 1;
+    state.aiThinking = false;
+    state.chat.thinkingLabel = "";
+  }
+
+  function isActiveAiRequest(token) {
+    return state.aiThinking && token === state.chat.requestToken;
+  }
+
+  async function requestChatGptDecision(decisionType, payload) {
+    if (!state.chat.apiKey) {
+      throw new Error("Missing OpenAI API key.");
+    }
+
+    const response = await fetch("/api/chatgpt/decision", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        apiKey: state.chat.apiKey,
+        model: state.chat.model,
+        decisionType,
+        payload,
+      }),
+    });
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = null;
+    }
+
+    if (!response.ok) {
+      throw new Error(data?.error || `OpenAI request failed (${response.status}).`);
+    }
+
+    if (!data || !data.decision || typeof data.decision !== "object") {
+      throw new Error("OpenAI returned an invalid decision.");
+    }
+
+    return data.decision;
+  }
+
+  function setChatStatusFromError(error, fallbackLabel) {
+    const message = error instanceof Error ? error.message : "OpenAI request failed.";
+    state.chat.status = `${message} ${fallbackLabel}`.trim();
+    if (el.chatStatus) {
+      el.chatStatus.textContent = state.chat.status;
+    }
+  }
+
+  function buildChatPublicState() {
+    const knowledge = engine.normalizeKnowledge(state.aiKnowledge);
+    const friendlyPieces = [];
+    const enemyPieces = [];
+    const knownEnemyLiveCounts = makeZeroCountMap();
+    const unknownEnemyPool = engine.estimateUnknownEnemyTypeCounts(state.board, state.humanSide, knowledge);
+
+    for (let r = 0; r < BOARD_SIZE; r += 1) {
+      for (let c = 0; c < BOARD_SIZE; c += 1) {
+        const piece = state.board[r][c];
+        if (!piece || piece === "lake") {
+          continue;
+        }
+
+        if (piece.side === state.aiSide) {
+          friendlyPieces.push({
+            coord: coordToText(r, c),
+            type: piece.type,
+            rank: battleNumberFromType(piece.type),
+            movable: piece.movable,
+          });
+          continue;
+        }
+
+        const knownType = engine.getKnownEnemyType(piece, knowledge);
+        if (knownType) {
+          knownEnemyLiveCounts[knownType] += 1;
+        }
+
+        enemyPieces.push({
+          coord: coordToText(r, c),
+          knownType: knownType || null,
+          moved: engine.hasEnemyMoved(piece, knowledge),
+          profile: summarizeEnemyProfile(piece, knowledge),
+        });
+      }
+    }
+
+    return {
+      boardSize: BOARD_SIZE,
+      lakes: LAKE_COORDS.map(([r, c]) => coordToText(r, c)),
+      yourPieces: friendlyPieces.sort((left, right) => left.coord.localeCompare(right.coord)),
+      enemyPieces: enemyPieces.sort((left, right) => left.coord.localeCompare(right.coord)),
+      knownEnemyLiveCounts: compactCountMap(knownEnemyLiveCounts),
+      unknownEnemyPool: compactCountMap(unknownEnemyPool),
+      revealedEnemyLosses: compactCountMap(knowledge.revealedEnemyLosses || {}),
+    };
+  }
+
+  function summarizeEnemyProfile(piece, knowledge) {
+    const profile = knowledge?.enemyProfiles?.[piece.id];
+    if (!profile) {
+      return null;
+    }
+    return {
+      moveCount: profile.moveCount || 0,
+      attackCount: profile.attackCount || 0,
+      maxDistance: profile.maxDistance || 0,
+      forwardMoves: profile.forwardMoves || 0,
+      backwardMoves: profile.backwardMoves || 0,
+      lateralMoves: profile.lateralMoves || 0,
+      frontlineTurns: profile.frontlineTurns || 0,
+    };
+  }
+
+  function summarizeMoveOption(move, id, expertSuggested) {
+    const attacker = state.board[move.fromR][move.fromC];
+    const defender = state.board[move.toR][move.toC];
+    const distance = Math.abs(move.toR - move.fromR) + Math.abs(move.toC - move.fromC);
+
+    return {
+      id,
+      expertSuggested,
+      notation: `${coordToText(move.fromR, move.fromC)} -> ${coordToText(move.toR, move.toC)}`,
+      pieceType: attacker ? attacker.type : "unknown",
+      pieceRank: attacker ? battleNumber(attacker) : "?",
+      distance,
+      target: summarizePublicTarget(defender),
+    };
+  }
+
+  function summarizePublicTarget(piece) {
+    if (!piece) {
+      return { kind: "empty" };
+    }
+
+    const knownType = engine.getKnownEnemyType(piece, state.aiKnowledge);
+    if (knownType) {
+      return {
+        kind: "revealed_enemy",
+        type: knownType,
+        rank: battleNumberFromType(knownType),
+      };
+    }
+
+    return {
+      kind: "hidden_enemy",
+      moved: engine.hasEnemyMoved(piece, state.aiKnowledge),
+    };
+  }
+
+  function compactCountMap(counts) {
+    const compact = {};
+    Object.entries(counts || {}).forEach(([type, count]) => {
+      if (count) {
+        compact[type] = count;
+      }
+    });
+    return compact;
+  }
+
+  function countFrontlineMovables(board, side) {
+    const frontRow = side === "light" ? 6 : 3;
+    let total = 0;
+    for (let c = 0; c < BOARD_SIZE; c += 1) {
+      const piece = board[frontRow][c];
+      if (piece && piece !== "lake" && piece.side === side && piece.movable) {
+        total += 1;
+      }
+    }
+    return total;
+  }
+
+  function sameMove(left, right) {
+    return (
+      !!left &&
+      !!right &&
+      left.fromR === right.fromR &&
+      left.fromC === right.fromC &&
+      left.toR === right.toR &&
+      left.toC === right.toC
+    );
   }
 
   function isKnownEnemyToAi(piece) {
@@ -3669,6 +4191,26 @@
 
   function sample(items) {
     return items[Math.floor(Math.random() * items.length)];
+  }
+
+  function loadStoredSetting(key) {
+    try {
+      return window.localStorage.getItem(key) || "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function storeSetting(key, value) {
+    try {
+      if (!value) {
+        window.localStorage.removeItem(key);
+      } else {
+        window.localStorage.setItem(key, value);
+      }
+    } catch (error) {
+      // Ignore local storage failures and keep the session usable.
+    }
   }
 
   function sideLabel(side) {
