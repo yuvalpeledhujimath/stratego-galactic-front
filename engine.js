@@ -141,6 +141,10 @@
   };
 
   const DEPLOYMENT_DIVERSITY = {
+    easy: 3,
+    medium: 4,
+    hard: 5,
+    expert: 6,
     player: 5,
   };
 
@@ -655,6 +659,38 @@
     return best;
   }
 
+  function pickWeightedPlacement(cells, scorer, rng = Math.random, topK = 3) {
+    if (!cells || cells.length === 0) {
+      return null;
+    }
+
+    const ranked = cells
+      .map((cell) => ({ cell, score: scorer(cell) }))
+      .sort((left, right) => right.score - left.score);
+    const top = ranked.slice(0, Math.max(1, Math.min(topK, ranked.length)));
+    const floor = top[top.length - 1].score;
+    const weights = top.map(({ score }, index) => {
+      const rankBoost = top.length - index;
+      const scoreBoost = Math.max(1, score - floor + 1);
+      return rankBoost * scoreBoost;
+    });
+
+    let total = 0;
+    weights.forEach((weight) => {
+      total += weight;
+    });
+
+    let roll = rng() * total;
+    for (let i = 0; i < top.length; i += 1) {
+      roll -= weights[i];
+      if (roll <= 0) {
+        return top[i].cell;
+      }
+    }
+
+    return top[top.length - 1].cell;
+  }
+
   function expandReserveSorted(reserve) {
     return Object.entries(reserve)
       .flatMap(([type, count]) => Array.from({ length: count }, () => type))
@@ -983,8 +1019,11 @@
       available.some((cell) => cell.r === candidate.r && cell.c === candidate.c)
     );
     const pool = preferred.length > 0 ? preferred : available;
-    const cell = pickBestPlacement(pool, (candidate) =>
-      strategicCellScore("flag", side, candidate, null, style, profile)
+    const cell = pickWeightedPlacement(
+      pool,
+      (candidate) => strategicCellScore("flag", side, candidate, null, style, profile),
+      rng,
+      4
     );
     if (!cell) {
       return null;
@@ -1148,11 +1187,11 @@
     const placeByHeuristic = (type, count, scorer) => {
       let placed = 0;
       while (placed < count && (reserve[type] ?? 0) > 0 && available.length > 0) {
-        const best = pickBestPlacement(available, (cell) => {
+        const best = pickWeightedPlacement(available, (cell) => {
           const base = scorer(cell);
           const antiCluster = adjacencyTypePenalty(board, side, type, cell, profile);
           return base - antiCluster + rng() * profile.noise;
-        });
+        }, rng, type === "flag" ? 4 : type === "marshal" || type === "general" ? 5 : 3);
 
         if (!best) {
           break;
@@ -2568,6 +2607,7 @@
         totalScore: staticScore,
         meta: {
           style: meta.style,
+          flagPosition: meta.flagPosition || null,
           styleLabel: meta.style ? DEPLOYMENT_STYLE_LABEL[meta.style] || meta.style : "Balanced",
         },
       });
@@ -2600,17 +2640,21 @@
     }
 
     const diverse = [];
-    const usedStyles = new Set();
+    const usedLayouts = new Set();
     candidates.forEach((candidate) => {
       const styleKey = candidate.meta.style || "balanced";
-      if (!usedStyles.has(styleKey) && diverse.length < 3) {
-        usedStyles.add(styleKey);
+      const flagKey = candidate.meta.flagPosition
+        ? `${candidate.meta.flagPosition.r},${candidate.meta.flagPosition.c}`
+        : "unknown";
+      const layoutKey = `${styleKey}:${flagKey}`;
+      if (!usedLayouts.has(layoutKey) && diverse.length < 4) {
+        usedLayouts.add(layoutKey);
         diverse.push(candidate);
       }
     });
 
     candidates.forEach((candidate) => {
-      if (diverse.length >= 3) {
+      if (diverse.length >= 5) {
         return;
       }
       if (!diverse.includes(candidate)) {
